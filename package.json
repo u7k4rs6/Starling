@@ -1,0 +1,25 @@
+{
+  "name": "starling-monorepo",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc -b --pretty",
+    "test": "vitest run",
+    "gate:core-isolation": "node tools/gates/core-isolation.mjs",
+    "gate:relay-ignorance": "node tools/gates/relay-ignorance.mjs",
+    "gates": "pnpm run gate:core-isolation && pnpm run gate:relay-ignorance"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/eslint-plugin": "^1.1.25",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/crdt" },
+    { "path": "packages/sim" },
+    { "path": "packages/relay" },
+    { "path": "packages/provider" },
+    { "path": "packages/editor" },
+    { "path": "packages/demo" }
+  ]
+}
