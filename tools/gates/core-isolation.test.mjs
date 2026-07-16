@@ -13,11 +13,11 @@ afterEach(() => {
   }
 });
 
-function makeFixture({ dependencies = {}, files = {} }) {
+function makeFixture({ dependencies = {}, peerDependencies, optionalDependencies, files = {} }) {
   tmpDir = mkdtempSync(path.join(os.tmpdir(), "core-isolation-"));
   writeFileSync(
     path.join(tmpDir, "package.json"),
-    JSON.stringify({ name: "fixture", dependencies })
+    JSON.stringify({ name: "fixture", dependencies, peerDependencies, optionalDependencies })
   );
   const srcDir = path.join(tmpDir, "src");
   mkdirSync(srcDir, { recursive: true });
@@ -114,6 +114,68 @@ describe("checkCoreIsolation", () => {
     });
     const violations = checkCoreIsolation(dir);
     expect(violations).toHaveLength(2);
+  });
+
+  it("flags a non-empty peerDependencies block", () => {
+    const dir = makeFixture({ peerDependencies: { react: "^18.0.0" } });
+    const violations = checkCoreIsolation(dir);
+    expect(violations.some((v) => v.match(/peerDependencies.*react/))).toBe(true);
+  });
+
+  it("flags a non-empty optionalDependencies block (ships to consumers)", () => {
+    const dir = makeFixture({ optionalDependencies: { fsevents: "^2.0.0" } });
+    const violations = checkCoreIsolation(dir);
+    expect(violations.some((v) => v.match(/optionalDependencies.*fsevents/))).toBe(true);
+  });
+
+  it("flags setTimeout — real hole: schedules against real time instead of the sim's virtual clock (ARCH §4)", () => {
+    const dir = makeFixture({ files: { "retry.ts": "setTimeout(() => {}, 100);" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("setTimeout()"))).toBe(true);
+  });
+
+  it("flags setInterval", () => {
+    const dir = makeFixture({ files: { "retry.ts": "setInterval(() => {}, 100);" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("setInterval()"))).toBe(true);
+  });
+
+  it("flags fetch — I/O in the core", () => {
+    const dir = makeFixture({ files: { "sync.ts": "fetch('/ops');" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("fetch()"))).toBe(true);
+  });
+
+  it("flags WebSocket", () => {
+    const dir = makeFixture({ files: { "sync.ts": "new WebSocket('wss://x');" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("WebSocket"))).toBe(true);
+  });
+
+  it("flags process.hrtime()", () => {
+    const dir = makeFixture({ files: { "clock.ts": "process.hrtime();" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("process.hrtime()"))).toBe(true);
+  });
+
+  it("flags process.uptime()", () => {
+    const dir = makeFixture({ files: { "clock.ts": "process.uptime();" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("process.uptime()"))).toBe(true);
+  });
+
+  it("flags requestAnimationFrame", () => {
+    const dir = makeFixture({ files: { "tick.ts": "requestAnimationFrame(() => {});" } });
+    expect(
+      checkCoreIsolation(dir).some((v) => v.includes("requestAnimationFrame()"))
+    ).toBe(true);
+  });
+
+  it("flags self as an indirection vector", () => {
+    const dir = makeFixture({ files: { "leak.ts": "self.setTimeout(() => {}, 0);" } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes('"self"') || v.endsWith("self"))).toBe(
+      true
+    );
+  });
+
+  it("flags globalThis as an indirection vector", () => {
+    const dir = makeFixture({ files: { "leak.ts": "globalThis.crypto.randomUUID();" } });
+    const violations = checkCoreIsolation(dir);
+    expect(violations.some((v) => v.includes("globalThis"))).toBe(true);
   });
 
   it("the real packages/crdt passes today", () => {

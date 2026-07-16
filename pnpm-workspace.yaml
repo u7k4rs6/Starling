@@ -1,2 +1,11 @@
 packages:
   - "packages/*"
+
+# docs/DECISIONS.md #0005. pnpm 10 already refuses to run dependency
+# postinstall/preinstall/install scripts unless allow-listed here — that
+# default is what SECURITY §3 means by "no install scripts." Asserting it
+# explicitly, empty, turns a default that happens to point the right way
+# into an invariant that fails loudly (a future pnpm major that changes the
+# default, or a contributor who adds an entry without discussion, both show
+# up as a real diff instead of a silent behavior change).
+onlyBuiltDependencies: []

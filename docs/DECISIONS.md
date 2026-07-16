@@ -59,3 +59,126 @@ gate; the string list is a tripwire for hand-rolled CRDT logic that doesn't
 go through an import statement, so it has to be tuned for distinctiveness
 against real relay vocabulary (CORS, HTTP headers, byte offsets), not just
 uniqueness against English.
+
+## 0003 — `passWithNoTests: false`
+
+**Step:** 0
+
+`vitest.config.ts` was written with `passWithNoTests: true` so the Step 0
+gate — "CI green on an empty suite" — would hold with zero product tests. It
+stopped being an honest representation of that intent the moment real tests
+existed: by the end of Step 0, `tools/gates/*.test.mjs` already had 23 tests
+in it. A flag that means "succeed even if nothing ran" sitting in a repo that
+already has things running is not a relaxed default, it is a config that
+would silently stop noticing if every test file were deleted or the test
+glob stopped matching — which is exactly the "convenient explanation for why
+a test passes" the project's own working requirements (`01-PRD.md` §6) rule
+out.
+
+**Resolved:** `passWithNoTests: false`. If the suite is ever actually empty
+again, CI fails until a real test (or an explicit, reasoned exception) exists
+— the green light stays evidence of something instead of becoming evidence
+of nothing.
+
+## 0004 — Core isolation gate, split into a structural half and a grep half; grep list extended; peer/optional deps included
+
+**Step:** 0
+
+Gate 1 was pure grep. Two problems with that:
+
+- Grep only catches what someone wrote as a literal name. `packages/crdt`'s
+  `tsconfig.json` didn't restrict `lib` or `types`, so `window`, `document`,
+  `process`, `Buffer`, and every DOM/Node ambient global were legal
+  references as far as the compiler was concerned; the grep list was the
+  only thing standing between the core and any of them, and grep lists need
+  to be remembered and extended by hand every time a new ambient name
+  matters (as #0001 already demonstrated once).
+- The list itself had a real hole even within its own approach:
+  `setTimeout`/`setInterval` were absent. ARCH §4's virtual clock exists so
+  the sim can control time; a core that calls `setTimeout(retry, 1000)`
+  bypasses that clock by *scheduling* against real time, not by *reading*
+  it, so it walks straight past every clock-read pattern (`Date.now()`,
+  `performance.now()`) the original list had. Same category of bug as the
+  `crypto.randomUUID()` gap in #0001: nondeterminism that doesn't look like
+  a clock read.
+
+**Resolved**, two changes:
+
+1. **Structural.** `packages/crdt/tsconfig.json` now sets `"lib": ["ES2022"]`
+   and `"types": []`. No DOM lib, no ambient `@types/node` — referencing
+   `window`, `fetch`, `localStorage`, `process`, `Buffer`, or `setTimeout`
+   in `src/` is now a type error, enforced by the typecheck gate that
+   already has to run, with no separate list to maintain. Test files are
+   excluded from this config (`tsconfig.json` excludes `src/**/*.test.ts`)
+   and get their own `tsconfig.test.json` — permissive `types: ["node"]`,
+   not composite, `noEmit` — because a test is explicitly allowed to
+   construct a scenario with real time or real randomness; only the
+   implementation is required to accept them as arguments.
+2. **Grep, kept as a second, independent gate.** Extended with
+   `setTimeout`, `setInterval` (the hole above), `fetch`, `WebSocket` (I/O
+   the core must never perform — the relay/provider boundary exists so the
+   core doesn't have to know a network exists), `process.hrtime`,
+   `process.uptime` (more ambient clocks), `requestAnimationFrame`, and
+   `self` / `globalThis` (banned as indirection: `globalThis.crypto
+   .randomUUID()` reaches the exact same nondeterminism as
+   `crypto.randomUUID()` through a property access that no single-symbol
+   pattern would match, and `self` is the same trick under Worker-flavored
+   code). The grep half is deliberately kept even though the structural
+   half now covers most of the same ground — the structural gate only holds
+   as long as `tsconfig.json` keeps `types: []`, and a future edit that
+   quietly adds `"types": ["node"]` for some unrelated reason should still
+   get caught by something. Two gates that partially overlap are not
+   redundant when the point is that neither depends on the other staying
+   correct.
+
+Also: `package.json`'s `dependencies`, `peerDependencies`, and
+`optionalDependencies` must all be empty, not just `dependencies`. An
+optional dependency still ships in the published tarball and still resolves
+for any consumer whose environment satisfies it — "zero runtime
+dependencies" (`01-PRD.md` §7, `03-SECURITY.md` §3) meant zero, and the
+`dependencies`-only check was checking a proxy for that claim, not the claim.
+
+## 0005 — Pin `onlyBuiltDependencies: []`; the esbuild postinstall-skip investigated, not assumed
+
+**Step:** 0
+
+`pnpm install` at the end of Step 0 printed: `Ignored build scripts:
+esbuild@0.21.5` — pnpm 10's default is to refuse dependency
+install/postinstall/preinstall scripts unless the package is allow-listed.
+Vitest (which depends on esbuild) worked anyway. Before relying on that,
+the mechanism was checked rather than assumed:
+
+- `esbuild@0.21.5`'s `package.json` declares `optionalDependencies` for
+  every `@esbuild/<platform>-<arch>` package and a `postinstall: node
+  install.js`.
+- `@esbuild/linux-x64` (the package matching this container) was present in
+  `node_modules/.pnpm` after install, resolved as an ordinary
+  platform-matched optional dependency — pnpm/npm resolve
+  `optionalDependencies` during normal install, which is dependency
+  resolution, not a build script. `@esbuild/linux-x64`'s own `package.json`
+  has no `scripts` field at all; it is prebuilt binary content, nothing to
+  run.
+- Reading `install.js`: it calls `require.resolve('@esbuild/<platform>/bin/
+  esbuild')` first, and only falls through to a network download if that
+  resolution *fails* (the documented failure case is a `node_modules`
+  copied across platforms, e.g. built on macOS and shipped to a Linux
+  Docker image). `bin/esbuild` (the binary vitest actually invokes) runs
+  the identical resolution logic itself, independent of whether
+  `install.js` ever ran.
+- pnpm's own state file (`node_modules/.modules.yaml`) confirms this run:
+  `ignoredBuilds: ["esbuild@0.21.5"]`, `pendingBuilds: []` — the script was
+  skipped outright, not deferred — and the full `lint`/`typecheck`/`test`/
+  gate sequence still passed, which is the empirical half of the check.
+
+So: the postinstall script is a *fallback download path* for a
+resolution that normally already succeeds via `optionalDependencies`, not
+the *acquisition* mechanism. Skipping it is safe for esbuild specifically,
+and — more to the point — this is exactly the "no install scripts" property
+`03-SECURITY.md` §3 asks for, already true by pnpm 10's default rather than
+by anything this repo did.
+
+**Resolved:** `onlyBuiltDependencies: []` added to `pnpm-workspace.yaml`,
+explicit and empty. The protection existed by default before this change;
+after it, the empty allow-list is a committed, reviewable invariant instead
+of an inherited default that a future pnpm major (or an unreviewed one-line
+addition) could silently change out from under the project.

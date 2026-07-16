@@ -8,6 +8,18 @@ const DEFAULT_PACKAGE_DIR = path.join(REPO_ROOT, "packages/crdt");
 
 // docs/DECISIONS.md #0001: new Date(/crypto.* were added after the original
 // list let ReplicaId self-assignment slip through a Math.random() grep.
+//
+// docs/DECISIONS.md #0004: packages/crdt/tsconfig.json now sets
+// lib: ["ES2022"] and types: [], which turns window/document/fetch/
+// localStorage/process/Buffer/setTimeout/etc into compile errors — a
+// stronger, self-maintaining version of the DOM-global checks below. This
+// list stays anyway, expanded, as a second gate that doesn't depend on that
+// tsconfig setting staying correct: setTimeout/setInterval (bypasses the
+// virtual clock in ARCH §4 by scheduling against real time, not reading it),
+// fetch/WebSocket (I/O the core must never perform), process.hrtime/
+// process.uptime (more ambient clocks), requestAnimationFrame, and self/
+// globalThis (indirection that could reach any of the above through a
+// property access the other patterns wouldn't match).
 const BANNED_PATTERNS = [
   { name: "Date.now()", re: /\bDate\.now\s*\(/ },
   { name: "new Date(", re: /\bnew\s+Date\s*\(/ },
@@ -15,6 +27,15 @@ const BANNED_PATTERNS = [
   { name: "performance.now()", re: /\bperformance\.now\s*\(/ },
   { name: "crypto.randomUUID()", re: /\bcrypto\.randomUUID\b/ },
   { name: "crypto.getRandomValues()", re: /\bcrypto\.getRandomValues\b/ },
+  { name: "setTimeout()", re: /\bsetTimeout\s*\(/ },
+  { name: "setInterval()", re: /\bsetInterval\s*\(/ },
+  { name: "fetch()", re: /\bfetch\s*\(/ },
+  { name: "WebSocket", re: /\bWebSocket\b/ },
+  { name: "process.hrtime()", re: /\bprocess\.hrtime\b/ },
+  { name: "process.uptime()", re: /\bprocess\.uptime\b/ },
+  { name: "requestAnimationFrame()", re: /\brequestAnimationFrame\s*\(/ },
+  { name: "self", re: /\bself\b/ },
+  { name: "globalThis", re: /\bglobalThis\b/ },
   { name: "DOM global: window", re: /\bwindow\b/ },
   { name: "DOM global: document", re: /\bdocument\b/ },
   { name: "DOM global: navigator", re: /\bnavigator\b/ },
@@ -24,17 +45,18 @@ const BANNED_PATTERNS = [
   { name: "DOM global: XMLHttpRequest", re: /\bXMLHttpRequest\b/ },
 ];
 
+const DEPENDENCY_FIELDS = ["dependencies", "peerDependencies", "optionalDependencies"];
+
 export function checkCoreIsolation(packageDir = DEFAULT_PACKAGE_DIR) {
   const violations = [];
 
   const pkgJsonPath = path.join(packageDir, "package.json");
   const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-  const deps = pkgJson.dependencies ?? {};
-  const depNames = Object.keys(deps);
-  if (depNames.length > 0) {
-    violations.push(
-      `package.json "dependencies" is not empty: ${depNames.join(", ")}`
-    );
+  for (const field of DEPENDENCY_FIELDS) {
+    const depNames = Object.keys(pkgJson[field] ?? {});
+    if (depNames.length > 0) {
+      violations.push(`package.json "${field}" is not empty: ${depNames.join(", ")}`);
+    }
   }
 
   for (const file of listSourceFiles(path.join(packageDir, "src"))) {

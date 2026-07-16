@@ -6,6 +6,6 @@ export default defineConfig({
       "packages/*/src/**/*.{test,spec}.{ts,mts}",
       "tools/**/*.{test,spec}.{ts,mts,js,mjs}",
     ],
-    passWithNoTests: true,
+    passWithNoTests: false,
   },
 });
