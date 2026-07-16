@@ -182,3 +182,48 @@ explicit and empty. The protection existed by default before this change;
 after it, the empty allow-list is a committed, reviewable invariant instead
 of an inherited default that a future pnpm major (or an unreviewed one-line
 addition) could silently change out from under the project.
+
+## 0006 — `NaiveDoc` shares `Sequence` from Step 2 onward, not from Step 1; the retrofit is the best exhibit, not bookkeeping
+
+**Step:** 1→2 (spec correction, author's error not the agent's)
+
+`01-PRD.md` §4 and `02-ARCHITECTURE.md` §2.2 both stated "all four [document
+classes] share one abstract `Sequence` base" without qualification. Read
+literally at Step 1, this is false: `01-PRD.md` §5's own ladder makes
+`ElemId` / `compareElemIds` / abstract `Sequence` **Step 2's** deliverable,
+so at Step 1 — when `NaiveDoc` (exhibit 1) is built — the base does not
+exist yet to share. The spec asserted an end state as if it were true at
+every point along the ladder that produces that end state, which is the
+kind of contradiction §0 of the PRD asks to be caught and stopped on rather
+than silently resolved either direction (build `Sequence` early and batch
+two ladder steps, or quietly drop `NaiveDoc` off the base to make the
+literal reading of Step 1 self-consistent).
+
+The correct resolution turned out to be more than a wording fix. `NaiveDoc`
+moving onto `Sequence` at Step 2 — gaining a real `ElemId`, idempotence, and
+causal delivery, all the machinery the other three exhibits get — and
+**still diverging**, because `integrate(op)` still ignores the id and places
+by raw index, is the sharpest version of "position is not identity"
+(`02-ARCHITECTURE.md` §2.4) the museum makes: identity alone buys nothing:
+a merge rule has to *use* it. The ladder's ordering — forced by "one step
+per session," not chosen for this reason — produces a two-beat
+demonstration (Step 1: no identity, doesn't commute, diverges. Step 2: has
+identity, still doesn't commute, still diverges) that a same-session build
+of `Sequence` would have collapsed into one beat and made invisible.
+
+**Resolved:**
+- `01-PRD.md` §4: the "share one abstract base" requirement is now stated
+  as the state from Step 2 onward, with the two-beat lesson spelled out
+  explicitly and a warning against "fixing" `NaiveDoc` once it's on the
+  base and still fails to converge.
+- `02-ARCHITECTURE.md` §2.2: same timing clarification, plus a note on why
+  `NaiveDoc` belongs on the base for exactly the reason it still breaks
+  after joining it.
+- `01-PRD.md` §4's exhibit 1 test was renamed to name the diagnosis —
+  `apply()` is not commutative — instead of only the symptom
+  (divergence), since commutativity is the through-line every later step
+  (RGA, Fugue, the fast-check property tests in Step 3) is chasing.
+
+(Filed as #0006 rather than #0003 as originally requested — #0003 through
+#0005 were already used by the Step 0 correction round logged earlier in
+this file.)

@@ -49,11 +49,13 @@ The counter is therefore **not a Lamport clock and does not need to be**. Conver
 
 ### 2.2 The abstract `Sequence`
 
-All four document classes (§4 of PRD) inherit one base that owns: id allocation, the counter, causal buffering of out-of-order ops, idempotence (applying the same op twice is a no-op), and the local editing API.
+All four document classes (§4 of PRD) inherit one base that owns: id allocation, the counter, causal buffering of out-of-order ops, idempotence (applying the same op twice is a no-op), and the local editing API. This base is Step 2's deliverable (§5 of PRD), so it does not exist at Step 1 — `NaiveDoc` (exhibit 1) is necessarily built standalone first and retrofitted onto `Sequence` when this step lands. "All four share one base" describes the repo from Step 2 onward, not Step 1's snapshot of it.
 
 Subclasses override exactly one method: `integrate(op)`. That is the merge rule and nothing else.
 
 The consequence is that `RgaDoc` and `Doc` differ by roughly one `while` loop. This is deliberate and is a deliverable: the museum only teaches if the delta is small enough to read.
+
+**Why `NaiveDoc` belongs on this base too, not just the other three.** Once `NaiveDoc` sits on `Sequence`, it gets a real `ElemId` per character, idempotence, and causal delivery — everything `ArrayDoc` gets — and it still diverges, because `integrate(op)` still places by raw index and ignores the id. That is the sharpest demonstration in the repo that identity and a correct merge rule are two separate things (§2.4's "position is not identity," one level up: *having* identity is not the same as a merge rule that *uses* it). See `01-PRD.md` §4 for the full two-beat version of this. Do not read `NaiveDoc` still failing after the retrofit as a bug to fix — a change that makes it converge without changing `integrate`'s logic has broken the exhibit.
 
 ### 2.3 Fugue, and why not RGA
 

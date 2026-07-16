@@ -66,7 +66,14 @@ Three exhibits, each in the codebase, each with a passing test that documents th
 
 `Doc` (Fugue over an order-statistic treap) is the survivor. It differs from `RgaDoc` by approximately one `while` loop, and that is the point: the museum makes the delta visible.
 
-**Requirement:** all four share one abstract `Sequence` base and all four run against the same test suite. If a change to the base breaks an exhibit, the exhibit was load-bearing and the change is wrong.
+**Requirement:** all four share one abstract `Sequence` base and all four run against the same test suite. This is the end state, not an invariant that holds at every rung of the build ladder (§5): `Sequence` is Step 2's own deliverable, so `NaiveDoc` is necessarily built without it at Step 1 and joins the base when Step 2 lands. Once it has, if a change to the base breaks an exhibit, the exhibit was load-bearing and the change is wrong.
+
+**The two-beat lesson (do not refactor this away).** `NaiveDoc`'s divergence test still passes *after* the Step 2 retrofit, and that is the point, not an oversight a future cleanup should "fix":
+
+1. **Step 1, no identity.** `NaiveDoc` merges by raw index. `apply()` is not commutative — `apply(a)∘apply(b) ≠ apply(b)∘apply(a)` for two concurrent inserts at the same index — because there is no element identity to reconcile the two inserts against. It diverges.
+2. **Step 2, has identity, still diverges.** `NaiveDoc` moves onto `Sequence`. It now has a unique `ElemId` per character, idempotent re-application, and causal delivery, same as every other exhibit. It **still** diverges, because none of that touches the merge rule — `NaiveDoc`'s `integrate(op)` still places by raw index and ignores the id it was handed. Commutativity lives in the merge rule, not in having identity.
+
+That second beat is the sharpest statement the museum makes of "position is not identity" (§2.4 of ARCH): identity alone buys you nothing if the merge rule doesn't use it. A future contributor who sees `NaiveDoc` sitting on the same `Sequence` base as `Doc` and still failing to converge, and "fixes" it by making `integrate` id-aware, has just reinvented `ArrayDoc` and deleted the exhibit that made the lesson visible.
 
 ## 5. Build ladder
 
