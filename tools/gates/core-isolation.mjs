@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripCommentsAndStrings } from "./strip-comments.mjs";
 import { listSourceFiles } from "./walk.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -36,6 +37,12 @@ const BANNED_PATTERNS = [
   { name: "requestAnimationFrame()", re: /\brequestAnimationFrame\s*\(/ },
   { name: "self", re: /\bself\b/ },
   { name: "globalThis", re: /\bglobalThis\b/ },
+  // docs/DECISIONS.md #0008: string-blanking hides a banned call's text if
+  // it's handed to eval/Function as a string argument, so the mechanism
+  // itself is banned outright instead — eval in a CRDT core is a red flag
+  // on its own merits regardless.
+  { name: "eval(", re: /\beval\s*\(/ },
+  { name: "new Function(", re: /\bnew\s+Function\s*\(/ },
   { name: "DOM global: window", re: /\bwindow\b/ },
   { name: "DOM global: document", re: /\bdocument\b/ },
   { name: "DOM global: navigator", re: /\bnavigator\b/ },
@@ -59,11 +66,18 @@ export function checkCoreIsolation(packageDir = DEFAULT_PACKAGE_DIR) {
     }
   }
 
+  const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+
   for (const file of listSourceFiles(path.join(packageDir, "src"))) {
+    if (TEST_FILE_RE.test(file)) continue; // docs/DECISIONS.md #0004/#0007: tests are exempt
     const text = readFileSync(file, "utf8");
+    // docs/DECISIONS.md #0008/#0009: scan code, not prose — "document" and
+    // "self" are ordinary English words this project's own comments use
+    // constantly, describing a document editor with self-contained replicas.
+    const codeOnly = stripCommentsAndStrings(text);
     const rel = path.relative(packageDir, file);
     for (const { name, re } of BANNED_PATTERNS) {
-      if (re.test(text)) {
+      if (re.test(codeOnly)) {
         violations.push(`${rel}: forbidden use of ${name}`);
       }
     }

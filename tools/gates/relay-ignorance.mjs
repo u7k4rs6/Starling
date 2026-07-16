@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./strip-comments.mjs";
 import { listSourceFiles } from "./walk.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -59,14 +60,19 @@ export function checkRelayIgnorance(packageDir = DEFAULT_PACKAGE_DIR) {
 
   for (const file of listSourceFiles(path.join(packageDir, "src"))) {
     const text = readFileSync(file, "utf8");
+    // docs/DECISIONS.md #0007: blank comments (not strings — the import
+    // specifier and any banned string this is meant to catch are both
+    // string literals in real code) so a comment explaining why a concept
+    // is *absent* doesn't trip the gate meant to catch its *presence*.
+    const codeText = stripComments(text);
     const rel = path.relative(packageDir, file);
 
-    for (const v of importsFromCrdt(file, text)) {
+    for (const v of importsFromCrdt(file, codeText)) {
       violations.push(`${rel}: ${v}`);
     }
 
     for (const needle of BANNED_STRINGS) {
-      if (text.includes(needle)) {
+      if (codeText.includes(needle)) {
         violations.push(`${rel}: contains banned string "${needle}"`);
       }
     }

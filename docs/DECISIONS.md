@@ -227,3 +227,211 @@ of `Sequence` would have collapsed into one beat and made invisible.
 (Filed as #0006 rather than #0003 as originally requested — #0003 through
 #0005 were already used by the Step 0 correction round logged earlier in
 this file.)
+
+## 0007 — Core isolation grep exempts `*.test.ts`/`*.spec.ts`, matching the tsconfig split
+
+**Step:** 2
+
+Found while wiring Step 2's new test files, before it could bite: gate 1's
+grep half (`tools/gates/core-isolation.mjs`) scanned every `.ts` file under
+`packages/crdt/src`, including test files, with no exemption. That
+contradicts #0004, which is explicit that tests are exempt from the
+ambient-time/randomness restriction — `tsconfig.test.json` exists precisely
+because "a test is explicitly allowed to construct a scenario with real time
+or real randomness; only the implementation is required to accept them as
+arguments." The structural half of gate 1 (the restrictive `tsconfig.json`)
+already honored that split by excluding `src/**/*.test.ts`; the grep half
+did not. Caught by inspection, not by a failing test, since no test file
+had yet used a banned pattern for real — it was a latent inconsistency
+between the doc's claim and the gate's behavior, not yet a live bug, and
+would have first surfaced as a confusing false-positive gate failure the
+first time a property test (Step 3, `fast-check`, seeded) legitimately
+needed real randomness to pick a seed.
+
+**Resolved:** `core-isolation.mjs` now skips any file matching
+`/\.(test|spec)\.[cm]?[jt]sx?$/` before applying `BANNED_PATTERNS`. Covered
+by three new cases in `core-isolation.test.mjs`: a `*.test.ts` and a
+`*.spec.ts` file using banned patterns are both clean, and a same-named
+non-test file with identical content is still flagged — confirming the
+exemption is keyed on the filename suffix, not on some coincidental
+substring match.
+
+## 0008 — Two gate tests asserted the bug and had been green since Step 0: a test written the same session as its implementation can certify the implementation's own misconception
+
+**Step:** 2
+
+The finding here is not the grep false positive. It's this: before it was
+fixed, `relay-ignorance.test.mjs` contained two passing tests — "flags the
+string Fugue" and "flags the string tombstone" — whose fixtures put the
+banned word inside a `//` comment and asserted that the gate *should* flag
+it. Those tests were written in Step 0, in the same session, by the same
+pass, as the gate implementation they were testing. The implementation
+scanned raw text including comments; the test was written to match that,
+not against the actual requirement ("catch hand-rolled CRDT logic," which a
+comment *mentioning* a concept is not). Implementation and test agreed with
+each other and had agreed since Step 0, through every subsequent green run
+in Steps 0 and 1 — because a test that checks "does the code do what the
+code does" instead of "does the code do what it's supposed to do" will
+always agree with a same-session implementation, by construction, and green
+stops being evidence of anything the moment that happens.
+
+This is exactly the failure "predict before you measure" and "do not tell
+me a test passes without knowing why it passes" (`01-PRD.md` §6) exist to
+stop, and it happened anyway, because those rules were applied to the
+*production* code and the *benchmark* results, not to the *gate tests
+written to check the gates*. **Generalization, worth carrying forward past
+this one bug:** a test authored in the same pass as the code it tests is at
+risk of testing the code's behavior instead of the spec's requirement,
+especially for infrastructure like these gates where "the test" and "the
+tripwire" are the same artifact and there's no separate spec to check it
+against except the prose in `ARCH §1`. The mitigation isn't "write more
+tests" — the two bad tests were tests — it's asking, per case, "would this
+assertion survive if the implementation had done the wrong thing instead
+of the right thing," and for a negative-space check like a gate (proving
+absence, not presence), specifically asking whether the fixture represents
+something that *should* be legal, not just something the current code
+happens to accept or reject.
+
+**The mechanical bug this exposed:** `sequence.ts`'s own doc comment reads
+"the abstract base every **document** class... inherits," and gate 1's
+`\bdocument\b` DOM-global pattern doesn't distinguish `document.write()`
+from English prose about a *document* editor — caught by a failing test
+this time (`pnpm run test` failed on `sequence.ts` right after #0007),
+which is the version of this mistake going right: the assertion in that
+test was written against the actual requirement (packages/crdt has no DOM
+global reference), so when the implementation's crude text match violated
+that requirement on real prose, the test caught it instead of certifying
+it.
+
+**Resolved:** `tools/gates/strip-comments.mjs` blanks `//` and `/* */`
+comments (replacing characters with spaces, preserving line count) before
+either gate's pattern matching runs, with an option to also blank string and
+template contents. Gate 1 (`core-isolation.mjs`) uses the string-blanking
+variant, since a banned *call* like `Math.random()` can't mean anything
+useful sitting inert inside a string literal. Gate 2 (`relay-ignorance.mjs`)
+uses the comments-only variant for both its import-specifier scan and its
+banned-string scan — the import check has to see real specifier strings to
+work at all, and a string literal containing a banned word (e.g. a
+`"tombstone"` JSON key) is still worth flagging, unlike a comment that only
+*mentions* the word. The two bad tests were rewritten to put the banned
+word in real code (where flagging it is correct), and new cases were added
+confirming the same words in a comment — or a commented-out `import` of
+`starling-crdt` — are now silently ignored, on both gates.
+
+**Closed in the same breath:** string-blanking in gate 1 means
+`eval("Date.now()")` would have its argument blanked, hiding the banned
+call from every pattern above. Fix: `eval(` and `new Function(` are now
+themselves banned patterns — the mechanism is banned outright regardless of
+what string it's handed, which is the only sound response to "the argument
+is now opaque to this gate," and `eval` in a CRDT core is a red flag on its
+own merits regardless.
+
+Known limitation, documented in `strip-comments.mjs` itself rather than
+silently accepted: this is a small state machine, not a real parser — it
+doesn't recognize regex literals (a regex containing `//` can be misread as
+a line comment start) and, in string-blanking mode, blanks a template
+literal's `${...}` interpolations along with the rest of the template. Both
+are acceptable for a tripwire over this repo's own source, not a
+general-purpose linter.
+
+## 0009 — Vocabulary collision: this project's gate ban lists are a subset of its own domain glossary
+
+**Step:** 2
+
+A generalization worth separating from #0008's specific bug, because it
+predicts future bugs of the same shape rather than explaining a past one.
+Gate 1 bans `document`, `self`, `window`. Gate 2 bans `Fugue`, `tombstone`,
+`originLeft`/`originRight`. Every one of those is either an ordinary
+English word or this project's own named vocabulary — and this is a
+*document* editor, with *self*-contained replicas, that will eventually
+implement *Fugue* for real (Step 6) and talk about *tombstones* constantly
+(§2.4 of ARCH) in code that sits right next to, but must never become,
+`packages/relay`. A grep-based gate over a codebase whose comments are
+permitted to describe the codebase in its own terms will always be a doc
+comment away from banning its own domain. This is not fixable in general —
+stripping comments (#0008) removes prose from the scan, but any *code*
+identifier that legitimately needs one of these words (a local variable
+named `self`, a relay log field literally called `origin` for CORS, per
+#0002) still has to be handled case by case, the way #0002 and #0008 each
+were.
+
+**The actionable form of this finding:** every time a new banned pattern is
+added to either gate (as gate 1's list already grew twice — #0001, #0004),
+check it against this project's own glossary before committing it, not
+just against generic JS globals. A pattern that's safe against `window` and
+`fetch` is not automatically safe against a word this project's own prose
+uses constantly. No code change from this entry — it's a standing caution
+for whoever (agent or human) next edits `BANNED_PATTERNS` or
+`BANNED_STRINGS`.
+
+## 0010 — `deps` is a runtime-only field; it never reaches the wire, and it can drift from the payload it describes
+
+**Step:** 2
+
+Two constraints on the `deps: ElemId[]` design from #0006's prediction,
+neither a reason to change it, both worth pinning down before Step 7 makes
+either one expensive to discover late.
+
+**`deps` must not be encoded.** It is derivable twice over from information
+the wire format already has to carry: the causal origin a merge rule needs
+is already sitting in the op's own `payload` (RGA/Fugue's `l` field, ARCH
+§2.3), and a replica's *own* prior op is implied for free by contiguous
+per-replica counters (ARCH §3.2 — "I have up to counter N" already says
+"and everything before N"). A field that duplicates information already
+present carries zero bits of new information and, at Step 7, would spend a
+whole extra `ElemId` per insert in a format that is explicitly fighting for
+individual bytes (LEB128 varints, RLE deletions, the 60,000-deletions-in-
+29-bytes target). Encoding `deps` would be paying wire cost for a runtime
+convenience. **Constraint, logged now so Step 7 doesn't have to rediscover
+it under deadline: `deps` is populated by `recordLocalOp`/derived by
+whoever constructs an op, used only by `Sequence`'s in-memory causal
+buffer, and reconstructed at decode time from the payload and the state
+vector — never serialized.** That reconstruction is Step 7's to design, not
+Step 2's; nothing here blocks on it.
+
+**`deps` can silently disagree with the payload it's attached to.** Nothing
+stops a subclass from emitting an op whose `deps` array doesn't actually
+match what its `payload` depends on — a bug that would make causal
+buffering do the wrong thing (integrate too early, or block forever on a
+dependency that was never real) with no error, because `Sequence` has no
+way to check this generically: an empty `deps` is *correct* for `NaiveDoc`
+and would be a *bug* for `RgaDoc`. This can only be validated per subclass,
+against that subclass's own definition of "actual dependency."
+
+**Resolved:** every doc class owns one test asserting its `deps` match its
+payload's real dependencies. Added for `NaiveDoc` now (`naive-doc.test.ts`)
+— trivial today, since a `{index, char}` payload has no id to depend on, so
+the assertion is just "`deps` is always `[]`" — specifically to establish
+the pattern before `RgaDoc` (Step 3) makes it load-bearing: its version of
+this test will assert `deps` contains exactly the origin id when one
+exists, and `[]` only for a genuinely originless insert.
+
+## 0011 — Step 1 prediction error: an abstract `dependencies(op)` method was wrong; `deps` as data on `Op<Payload>` is strictly better
+
+**Step:** 1→2 (the author's error, logged as requested, not the agent's)
+
+Before Step 2, the prediction on record was that `Sequence`'s causal
+buffering would need a second override point — an abstract
+`dependencies(op): ElemId[]` alongside `integrate(op)` — to let each
+subclass say what an op depends on, since `NaiveOp` and the eventual RGA
+`InsertOp` extract dependencies from completely different payload shapes.
+That prediction was wrong, and the correction (this agent's, working from
+the same prompt) is what actually got built in Step 2: `deps` is a plain
+field on the `Op<Payload>` envelope, populated wherever the op is
+constructed (already subclass-specific work, since payload construction
+already differs per subclass), read generically by the base's causal
+buffer. `integrate(op)` stays the *only* override, exactly as ARCH §2.2
+requires, with no second abstract method needed.
+
+Worth stating why the wrong prediction happened, not just that it did: a
+`dependencies(op)` method reads naturally as "of course each merge
+strategy needs to know its own dependencies," which is true, but conflates
+*deriving* a dependency (subclass-specific, happens once, at op
+construction) with *checking* a dependency (generic, happens on every
+`receive()`, belongs in the base). Once those are separated, the derivation
+half turns out to already be inside a subclass-specific code path (the
+local-edit method), and the checking half needs no polymorphism at all —
+just a field to read. The instinct to reach for a virtual method is the
+same instinct that would have added a second override point to a base
+whose entire pedagogical claim (§2.2 of ARCH, the museum's one-`while`-loop
+delta between `RgaDoc` and `Doc`) depends on there being exactly one.

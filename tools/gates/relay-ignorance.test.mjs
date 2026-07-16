@@ -77,14 +77,35 @@ describe("checkRelayIgnorance", () => {
     expect(checkRelayIgnorance(dir).some((v) => v.includes('"ElemId"'))).toBe(true);
   });
 
-  it("flags the string Fugue", () => {
-    const dir = makeFixture({ files: { "log.ts": "// Fugue-aware log" } });
+  it("flags the string Fugue in real code", () => {
+    const dir = makeFixture({ files: { "log.ts": "type Strategy = Fugue;" } });
     expect(checkRelayIgnorance(dir).some((v) => v.includes('"Fugue"'))).toBe(true);
   });
 
-  it("flags the string tombstone", () => {
-    const dir = makeFixture({ files: { "log.ts": "// skip tombstone bytes" } });
+  it("flags the string tombstone in real code", () => {
+    const dir = makeFixture({ files: { "log.ts": "const tombstone = true;" } });
     expect(checkRelayIgnorance(dir).some((v) => v.includes('"tombstone"'))).toBe(true);
+  });
+
+  it("does not flag banned strings mentioned only in a comment (DECISIONS #0007)", () => {
+    const dir = makeFixture({
+      files: {
+        "log.ts":
+          "// This relay deliberately has no Fugue awareness, no tombstone\n" +
+          "// handling, and no ElemId or compareElemIds anywhere.\n" +
+          "export function appendBytes(buf: Uint8Array) { return buf.length; }",
+      },
+    });
+    expect(checkRelayIgnorance(dir)).toEqual([]);
+  });
+
+  it("does not flag a commented-out import of starling-crdt", () => {
+    const dir = makeFixture({
+      files: {
+        "log.ts": '// import { compareElemIds } from "starling-crdt";\nexport {};',
+      },
+    });
+    expect(checkRelayIgnorance(dir)).toEqual([]);
   });
 
   it("flags originLeft and originRight but not bare origin", () => {

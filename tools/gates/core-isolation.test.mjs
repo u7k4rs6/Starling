@@ -178,6 +178,44 @@ describe("checkCoreIsolation", () => {
     expect(violations.some((v) => v.includes("globalThis"))).toBe(true);
   });
 
+  it("flags eval() even when it's the only way a banned call would be visible (DECISIONS #0008)", () => {
+    // String-blanking (the fix for #0008) hides the text "Date.now()" once
+    // it's inside a string literal — eval must be banned as a mechanism,
+    // not detected by trying to see through it.
+    const dir = makeFixture({ files: { "leak.ts": 'eval("Date.now()");' } });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("eval("))).toBe(true);
+  });
+
+  it("flags new Function( for the same reason", () => {
+    const dir = makeFixture({
+      files: { "leak.ts": 'const f = new Function("return Math.random()");' },
+    });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("new Function("))).toBe(true);
+  });
+
+  it("does not flag banned patterns in *.test.ts files — tests are exempt (DECISIONS #0004/#0007)", () => {
+    const dir = makeFixture({
+      files: { "sequence.test.ts": "const seed = Math.random(); crypto.randomUUID();" },
+    });
+    expect(checkCoreIsolation(dir)).toEqual([]);
+  });
+
+  it("does not flag banned patterns in *.spec.ts files either", () => {
+    const dir = makeFixture({
+      files: { "sequence.spec.ts": "setTimeout(() => {}, 0);" },
+    });
+    expect(checkCoreIsolation(dir)).toEqual([]);
+  });
+
+  it("still flags the same banned pattern in a same-named non-test file", () => {
+    // Sanity check that the exemption is about the .test./.spec. suffix,
+    // not about matching "sequence" or any other coincidental substring.
+    const dir = makeFixture({
+      files: { "sequence.ts": "const seed = Math.random();" },
+    });
+    expect(checkCoreIsolation(dir).some((v) => v.includes("Math.random()"))).toBe(true);
+  });
+
   it("the real packages/crdt passes today", () => {
     expect(checkCoreIsolation()).toEqual([]);
   });
