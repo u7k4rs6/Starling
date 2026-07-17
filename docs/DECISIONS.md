@@ -773,3 +773,71 @@ now-invisible anchor." Full suite re-run clean afterward: 153 tests,
 including 500 fresh property-test runs cross-checking `Doc` against a
 plain-array reference for single-replica sequences, and the two- and
 three-word interleaving-prevention proofs.
+
+## 0018 — Step 7: op log added to `Sequence`; `TextEncoder`/`TextDecoder` confirmed unavailable under gate 1; 60,000 deletions measured at 14 bytes; one more wrong test assertion, distinguished from a real bug
+
+**Step:** 7
+
+**A base-class addition, checked against all four exhibits before trusting
+it.** `missingFrom(theirVector)` (ARCH §3.2) needs to return actual past
+ops, not just current tree state, and nothing in `Sequence` retained ops
+after `integrate()` absorbed them — `accepted`/`integratedIds` track *which
+ids* were seen, never the op payloads. Added a `log: Op<Payload>[]`,
+appended in `integrateAndDrain`, plus `getStateVector()` (walks
+`integratedIds` per replica to find the highest contiguous counter — a
+real computation, not the stored max, because a gap is possible: nothing
+in the causal-buffering logic guarantees a replica's own counters arrive
+gap-free, only that an op's declared `deps` are satisfied first, and nothing
+requires "my own counter N-1" to be among them) and `missingFrom()`. Per
+PRD §4's own rule ("if a change to the base breaks an exhibit, the exhibit
+was load-bearing and the change is wrong"), this is exactly the kind of
+change that could have silently broken something — full suite re-run
+clean, plus new tests added at both layers: the abstract base
+(`sequence.test.ts`, using the `LogSequence` test double, including a
+deliberate-gap case proving the vector doesn't lie when there's a hole)
+and the shared contract (`doc-contract.test-helpers.ts`, exercised against
+real `ArrayDoc`/`RgaDoc`/`Doc` instances with real insert/delete payloads
+and causal chains, not just the toy payload the base's own tests use).
+
+**`TextEncoder`/`TextDecoder` checked, not assumed, before deciding they
+were unavailable.** Wire encoding needs UTF-8. Wrote a one-line file
+using both under `packages/crdt`'s tsconfig and ran `tsc` directly against
+it: `TS2304: Cannot find name 'TextEncoder'` / `'TextDecoder'` — confirmed
+absent under `lib: ["ES2022"]` + `types: []`, exactly as the structural
+half of gate 1 (DECISIONS #0004) intends. This is the gate doing its job
+on a genuinely-reached-for global (encoding needs *some* UTF-8 mechanism,
+and `TextEncoder` is the obvious first instinct), not a hypothetical.
+Wrote a manual codepoint-based UTF-8 codec instead (`encodeUtf8`/
+`decodeUtf8` in `encoding.ts`), verified by a 1000-run fast-check property
+test round-tripping arbitrary strings, including multi-byte and
+surrogate-pair code points.
+
+**Prediction confirmed, closely.** Before running the 60,000-deletions
+benchmark test, predicted "roughly 12-20 bytes, comfortably under the
+cited 29" from counting the header, record type, four varuints, and a
+3-byte count varuint by hand. Measured: 14 bytes. The docs' own cited
+figure (29 bytes) was not independently re-derived or matched exactly —
+noted honestly in the test name itself rather than implied — but the
+qualitative claim (a single contiguous run of 60,000 deletions collapses
+to a small constant, not 60,000 individual records) reproduces with room
+to spare.
+
+**A second wrong-assertion-not-a-bug, same shape as DECISIONS #0013's.**
+A "replica table dedup" test asserted `encoded byte length < 20 ×
+"solo".length` (80 bytes) for 20 insert ops sharing one replica id;
+measured 185. Before treating this as an encoder bug, did the arithmetic
+the assertion should have done first: 20 insert records each carry ~8-9
+bytes of real per-op data (record type, id, origin presence + id, side,
+char-length + char) *regardless* of how well the replica table dedups —
+the assertion compared total output size against a number with no
+principled relationship to what dedup actually saves. Rewrote the test to
+check the actual claim directly: encode 20 ops sharing one long,
+deliberately-distinctive replica id, and assert that id's UTF-8 byte
+sequence appears in the output exactly once (a literal substring count),
+not that some unrelated size bound holds. This is now the third time in
+this log a hand-estimated numeric assertion turned out to be the wrong
+thing to assert (#0013 for converged-string content, #0014 for the
+ArrayDoc/RgaDoc ratio at one n, this one for total encoded size) — worth
+naming as a pattern: a test asserting "this specific number" should assert
+a number the code being tested actually determines, not one a human
+free-hand estimated from an unrelated quantity.

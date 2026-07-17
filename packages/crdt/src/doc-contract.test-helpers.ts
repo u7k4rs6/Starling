@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { ElemId } from "./elem-id.js";
 import type { CrdtOp, InsertPayload } from "./ops.js";
+import type { StateVector } from "./sequence.js";
 
 export type CrdtDoc = {
   readonly text: string;
@@ -9,6 +10,8 @@ export type CrdtDoc = {
   insertBefore(tombstoneId: ElemId, char: string): CrdtOp;
   deleteLocal(visibleIndex: number): CrdtOp;
   receive(op: CrdtOp): void;
+  getStateVector(): StateVector;
+  missingFrom(theirVector: StateVector): CrdtOp[];
 };
 
 function asInsert(payload: CrdtOp["payload"]): InsertPayload {
@@ -157,6 +160,32 @@ export function runDocContractTests(label: string, makeDoc: (replica: string) =>
 
       expect(r1.text).toBe(r2.text);
       expect(r1.text.length).toBe(3); // a, c, X — "b" tombstoned
+    });
+
+    it("state-vector sync (ARCH §3.2): missingFrom the other's vector, applied, reproduces full convergence — no queue, just the delta", () => {
+      const a = makeDoc("A");
+      a.insertLocal(0, "a");
+      a.insertLocal(1, "b");
+      a.deleteLocal(0);
+      const b = makeDoc("B");
+      b.insertLocal(0, "z");
+
+      // A and B have never synced.
+      expect(a.getStateVector()).not.toEqual(b.getStateVector());
+
+      const missingForB = a.missingFrom(b.getStateVector());
+      for (const op of missingForB) b.receive(op);
+      const missingForA = b.missingFrom(a.getStateVector());
+      // missingForA, computed before b applied A's ops, may now include
+      // ops b already has — receive() is idempotent, so applying it is
+      // still correct; this is exactly why "no offline queue" (ARCH §6)
+      // works without needing to track what was already sent.
+      for (const op of missingForA) a.receive(op);
+      const stillMissingForA = b.missingFrom(a.getStateVector());
+      for (const op of stillMissingForA) a.receive(op);
+
+      expect(a.text).toBe(b.text);
+      expect(a.getStateVector()).toEqual(b.getStateVector());
     });
   });
 }

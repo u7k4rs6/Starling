@@ -23,6 +23,16 @@ export type Op<Payload> = {
 };
 
 /**
+ * `Map<ReplicaId, highestContiguousCounter>` (ARCH §3.2): for each
+ * replica, the highest N such that counters 0..N from that replica have
+ * all been integrated, with no gap. A replica absent from the map means
+ * none of its ops have been integrated yet. This is a summary of
+ * everything a replica has, in bytes proportional to replica count, not
+ * op count — the whole point of state-vector sync.
+ */
+export type StateVector = Map<ReplicaId, number>;
+
+/**
  * The abstract base every document class (PRD §4) inherits from Step 2
  * onward. Owns id allocation, the per-replica counter, causal buffering of
  * out-of-order ops, and idempotence. Subclasses override exactly one
@@ -33,6 +43,10 @@ export abstract class Sequence<Payload> {
   private readonly accepted = new Map<ReplicaId, Set<number>>();
   private readonly integratedIds = new Map<ReplicaId, Set<number>>();
   private readonly pending: Op<Payload>[] = [];
+  /** Every integrated op, in integration order — needed by `missingFrom`
+   * (ARCH §3.2). Deps are not re-derivable from the tree alone once
+   * integrated, so this is a real log, not just a derived view. */
+  private readonly log: Op<Payload>[] = [];
 
   protected constructor(protected readonly replica: ReplicaId) {}
 
@@ -73,6 +87,7 @@ export abstract class Sequence<Payload> {
   private integrateAndDrain(op: Op<Payload>): void {
     this.integrate(op);
     idSetAdd(this.integratedIds, op.id);
+    this.log.push(op);
 
     let progressed = true;
     while (progressed) {
@@ -83,11 +98,31 @@ export abstract class Sequence<Payload> {
           this.pending.splice(i, 1);
           this.integrate(next);
           idSetAdd(this.integratedIds, next.id);
+          this.log.push(next);
           progressed = true;
           break;
         }
       }
     }
+  }
+
+  /** ARCH §3.2. Recomputed from `integratedIds` each call — cheap enough
+   * not to bother caching before a benchmark says otherwise (Step 15). */
+  getStateVector(): StateVector {
+    const vector: StateVector = new Map();
+    for (const [replica, counters] of this.integratedIds) {
+      let highest = -1;
+      while (counters.has(highest + 1)) highest += 1;
+      if (highest >= 0) vector.set(replica, highest);
+    }
+    return vector;
+  }
+
+  /** Every op this replica has integrated that `theirVector` doesn't yet
+   * cover — the entire offline story (ARCH §6): "reconnect, ask the relay
+   * for its cursor, compute the delta, push." No queue, just this. */
+  missingFrom(theirVector: StateVector): Op<Payload>[] {
+    return this.log.filter((op) => op.id.counter > (theirVector.get(op.id.replica) ?? -1));
   }
 
   protected abstract integrate(op: Op<Payload>): void;

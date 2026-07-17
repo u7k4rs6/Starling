@@ -8,3 +8,5 @@ export { ArrayDoc } from "./array-doc.js";
 export type { CrdtOp, CrdtPayload, DeletePayload, InsertPayload } from "./array-doc.js";
 export { RgaDoc } from "./rga-doc.js";
 export { Doc } from "./fugue-doc.js";
+export { decodeOps, encodeOps } from "./encoding.js";
+export type { StateVector } from "./sequence.js";

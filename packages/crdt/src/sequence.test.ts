@@ -96,3 +96,79 @@ describe("Sequence (abstract base, Step 2)", () => {
     expect(receiver.integrated).toEqual(["dependency", "dependent"]);
   });
 });
+
+describe("Sequence: state vector and missingFrom (ARCH §3.2, Step 7)", () => {
+  it("getStateVector reports the highest counter with no gap, per replica", () => {
+    const seq = new LogSequence("A");
+    seq.recordLocal("x"); // counter 0
+    seq.recordLocal("y"); // counter 1
+    seq.recordLocal("z"); // counter 2
+    expect(seq.getStateVector()).toEqual(new Map([["A", 2]]));
+  });
+
+  it("a replica with no integrated ops is absent from its own state vector", () => {
+    const seq = new LogSequence("A");
+    expect(seq.getStateVector()).toEqual(new Map());
+  });
+
+  it("a gap in received counters caps the reported vector below the gap, not at the highest received", () => {
+    const origin = new LogSequence("A");
+    const op0 = origin.recordLocal("first"); // counter 0
+    const op1 = origin.recordLocal("second", [op0.id]); // counter 1
+    const op2 = origin.recordLocal("third", [op1.id]); // counter 2
+
+    const receiver = new LogSequence("R");
+    receiver.receive(op0);
+    receiver.receive(op2); // counter 1 (op1) never arrives — a real gap
+    // op2 depends on op1, so it's buffered, not integrated — the gap is
+    // both "not yet reported" and "not yet applied," for the same reason.
+    expect(receiver.getStateVector()).toEqual(new Map([["A", 0]]));
+  });
+
+  it("missingFrom returns exactly the ops the other vector doesn't cover, across replicas", () => {
+    const a = new LogSequence("A");
+    const opA0 = a.recordLocal("a0");
+    const opA1 = a.recordLocal("a1", [opA0.id]);
+    const b = new LogSequence("B");
+    const opB0 = b.recordLocal("b0");
+
+    const full = new LogSequence("F");
+    full.receive(opA0);
+    full.receive(opA1);
+    full.receive(opB0);
+
+    // "I have A up to 0, nothing from B" — missing A's counter 1 and all of B.
+    const theirVector = new Map([["A", 0]]);
+    const missing = full.missingFrom(theirVector);
+    expect(missing.map((op) => op.payload.value).sort()).toEqual(["a1", "b0"]);
+  });
+
+  it("missingFrom returns nothing once the other vector already covers everything", () => {
+    const seq = new LogSequence("A");
+    seq.recordLocal("x");
+    seq.recordLocal("y");
+    expect(seq.missingFrom(seq.getStateVector())).toEqual([]);
+  });
+
+  it("missingFrom against an empty vector returns the entire log", () => {
+    const seq = new LogSequence("A");
+    seq.recordLocal("x");
+    seq.recordLocal("y");
+    const missing = seq.missingFrom(new Map());
+    expect(missing.map((op) => op.payload.value)).toEqual(["x", "y"]);
+  });
+
+  it("round-trips through another replica: applying missingFrom's result reproduces full state", () => {
+    const origin = new LogSequence("A");
+    origin.recordLocal("x");
+    origin.recordLocal("y");
+    origin.recordLocal("z");
+
+    const receiver = new LogSequence("R");
+    const missing = origin.missingFrom(receiver.getStateVector());
+    for (const op of missing) receiver.receive(op);
+
+    expect(receiver.integrated).toEqual(origin.integrated);
+    expect(receiver.getStateVector()).toEqual(origin.getStateVector());
+  });
+});
