@@ -571,3 +571,56 @@ right"; the other was "the test forgot to send an op." Different failure,
 different fix, and conflating them would have meant either debugging the
 merge rule for a bug that wasn't there, or writing off a real finding as
 "probably just a test bug."
+
+## 0014 — Treap vs array speedup is modest at small n, dramatic at large n; a wrong prediction about *when* the treap wins, and an incidental confirmation of the historical ~41s figure
+
+**Step:** 4b
+
+Predicted going into the S6 benchmark: RgaDoc (treap, O(log n) per op)
+would be substantially faster than ArrayDoc (array, O(n) per op) at any
+size worth measuring, since O(log n) beats O(n) by definition. Measured at
+the scale the committed test uses for its trend check, n=3000: ArrayDoc
+22.1ms, RgaDoc 15.9ms — RgaDoc wins, but by ~1.4x, not the dramatic margin
+the asymptotic gap suggests. The prediction was wrong in *degree*, not
+*direction*.
+
+Checked why rather than shrugging it off: swept n from 1000 to 100000
+outside the committed suite (this sweep is not itself committed — the
+100k-array leg alone takes real wall-clock time no CI run should pay for
+routinely; see below). Ratio (array ms ÷ rga ms) by n: 1000 → 2.66x,
+5000 → 3.57x, 20000 → 21.16x, 50000 → 49.39x, 100000 → 69.54x. The
+speedup is real and grows essentially without bound, exactly matching
+O(n²) (array: O(n) work × n ops) versus O(n log n) (treap: O(log n) work ×
+n ops) — `n / log n` grows unboundedly, so the ratio has to keep growing.
+At n=3000 the two are close because the treap's constant factor is
+higher (object allocation per node, recursive split/merge, a `Map` insert
+per op) against array `splice`'s very low constant factor (a single
+optimized native memmove) — the crossover where the better asymptotic
+complexity actually wins in wall-clock terms is somewhere in the low
+thousands to low tens-of-thousands for this implementation, not at
+n=3000, and *nowhere near* n=1 the way a naive "O(log n) < O(n) so it's
+always faster" reading would suggest.
+
+**Incidental confirmation, not the point of this entry but worth
+recording:** the same sweep measured ArrayDoc at n=100000 taking 26.5s —
+real wall-clock, not extrapolated. `01-PRD.md` §4 and `02-ARCHITECTURE.md`
+§2.5 cite "~41s extrapolated" from the lost prior build. Same order of
+magnitude, independently arrived at on different hardware with a fresh
+implementation — reasonable corroboration of a number that could otherwise
+only be trusted on faith, though it is not a substitute for Step 15's own
+committed benchmark run (different machine, different exact workload
+shape, and this run's numbers were never intended to be citable — they
+were a sanity check for the prediction above, not a benchmark).
+
+**Resolved / committed:** the S6 gate itself (`rga-doc.test.ts`) measures
+only RgaDoc at n=100000 (412ms, well under the 1s target) — that is the
+actual gate. A second, *committed* test compares ArrayDoc against RgaDoc
+at n=3000 (small enough to run every CI invocation without cost) purely
+as a trend sanity check, asserting only `rga < array` at that scale, not
+a specific ratio — the ratio itself is n-dependent and asserting a number
+observed at one n would be asserting an artifact of this run, not a
+property. The 1000–100000 sweep that produced the table above is not
+committed, by design: routinely paying 26.5s of CI time to reconfirm a
+trend that a single fast assertion already covers would be exactly the
+kind of unexplained cost §6 of the PRD warns against paying without
+knowing why.

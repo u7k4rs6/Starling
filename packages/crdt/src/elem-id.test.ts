@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareElemIds, type ElemId } from "./elem-id.js";
+import { compareElemIds, hashElemId, type ElemId } from "./elem-id.js";
 
 describe("compareElemIds", () => {
   it("orders primarily by counter, regardless of replica", () => {
@@ -59,5 +59,34 @@ describe("compareElemIds", () => {
     expect(compareElemIds(a, b)).toBeLessThan(0); // a < b: same counter, "a" < "z"
     expect(compareElemIds(b, c)).toBeLessThan(0); // b < c: counter 1 < 2 wins over replica
     expect(compareElemIds(a, c)).toBeLessThan(0); // a < c: transitivity holds
+  });
+});
+
+describe("hashElemId (ARCH §2.5: treap priority, deterministic, not Math.random)", () => {
+  it("is a pure function: the same id always hashes to the same value", () => {
+    const a: ElemId = { replica: "alice", counter: 7 };
+    const b: ElemId = { replica: "alice", counter: 7 };
+    expect(hashElemId(a)).toBe(hashElemId(b));
+  });
+
+  it("two independently-constructed RgaDoc-style ids from different replicas hash differently in the common case", () => {
+    // Not a formal collision-resistance proof (a 32-bit hash can and does
+    // collide) — just a sanity check that adjacent, similar-looking ids
+    // don't trivially hash to the same priority, which would defeat the
+    // point of hashing at all.
+    const values = new Set<number>();
+    for (let counter = 0; counter < 200; counter += 1) {
+      for (const replica of ["A", "B", "C"]) {
+        values.add(hashElemId({ replica, counter }));
+      }
+    }
+    expect(values.size).toBe(600);
+  });
+
+  it("returns a non-negative 32-bit integer", () => {
+    const h = hashElemId({ replica: "x", counter: 12345 });
+    expect(Number.isInteger(h)).toBe(true);
+    expect(h).toBeGreaterThanOrEqual(0);
+    expect(h).toBeLessThanOrEqual(0xffffffff);
   });
 });

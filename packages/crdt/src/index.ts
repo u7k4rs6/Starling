@@ -6,3 +6,4 @@ export { NaiveDoc } from "./naive-doc.js";
 export type { NaiveOp, NaivePayload } from "./naive-doc.js";
 export { ArrayDoc } from "./array-doc.js";
 export type { CrdtOp, CrdtPayload, DeletePayload, InsertPayload } from "./array-doc.js";
+export { RgaDoc } from "./rga-doc.js";

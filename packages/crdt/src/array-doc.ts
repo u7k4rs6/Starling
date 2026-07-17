@@ -1,10 +1,8 @@
 import { compareElemIds, type ElemId, type ReplicaId } from "./elem-id.js";
-import { Sequence, type Op } from "./sequence.js";
+import { Sequence } from "./sequence.js";
+import type { CrdtOp, CrdtPayload } from "./ops.js";
 
-export type InsertPayload = { type: "insert"; l: ElemId | null; char: string };
-export type DeletePayload = { type: "delete"; target: ElemId };
-export type CrdtPayload = InsertPayload | DeletePayload;
-export type CrdtOp = Op<CrdtPayload>;
+export type { CrdtOp, CrdtPayload, DeletePayload, InsertPayload } from "./ops.js";
 
 type Elem = { id: ElemId; char: string; deleted: boolean };
 

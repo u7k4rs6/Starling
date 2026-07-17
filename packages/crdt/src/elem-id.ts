@@ -19,3 +19,22 @@ export function compareElemIds(a: ElemId, b: ElemId): number {
   if (a.replica > b.replica) return 1;
   return 0;
 }
+
+/**
+ * Deterministic hash of an ElemId, used as a treap node's priority
+ * (ARCH §2.5). Not `Math.random()`: priority has to be a pure function of
+ * the id so every replica computes the identical tree shape for the
+ * identical set of elements — that's what makes divergence bugs
+ * reproducible instead of dependent on which replica happened to roll
+ * which random number. FNV-1a, 32-bit: fast, well-distributed, no
+ * ambient anything.
+ */
+export function hashElemId(id: ElemId): number {
+  const s = `${id.replica}:${id.counter}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) {
+    hash ^= s.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
