@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       "packages/*/src/**/*.{test,spec}.{ts,mts}",
+      "packages/*/research/**/*.{test,spec}.{ts,mts,js,mjs}",
       "tools/**/*.{test,spec}.{ts,mts,js,mjs}",
     ],
     passWithNoTests: false,

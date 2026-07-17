@@ -435,3 +435,87 @@ just a field to read. The instinct to reach for a virtual method is the
 same instinct that would have added a second override point to a base
 whose entire pedagogical claim (§2.2 of ARCH, the museum's one-`while`-loop
 delta between `RgaDoc` and `Doc`) depends on there being exactly one.
+
+## 0012 — Exhaustive origin-forest search (ARCH §2.1), run before Step 3's merge rule: zero divergence, reproduced exactly, model corrected once along the way
+
+**Step:** 2→3 prep. Reproduction of a prior-build finding whose original code is lost; the search here is a fresh implementation, not a re-run.
+
+**Prediction, disclosed honestly:** by the time this search ran, ARCH §2.1's
+stated conclusion had already been read in full during this session's
+initial pass over the docs, so a claim of a blind guess would be false. The
+independently-reasoned prediction, separate from recall of that passage:
+general RGA convergence theory doesn't require the tie-breaking total order
+to be causally monotonic, only that it be fixed and computed identically by
+every replica — so the prediction was zero divergence, with or without
+monotonicity, matching the doc. Genuine uncertainty existed on one point,
+not resolved by memory: whether the *simplified* 4-line `integrate()` given
+in ARCH §2.3 (which skips forward past **any** higher-precedence element,
+not just same-origin siblings) inherits that guarantee, since it is not
+textbook RGA with subtree-boundary checking. That part had to be run to
+know.
+
+**First attempt undercounted, and the gap was reported rather than
+papered over.** A first enumeration modeled "origin forest" as: elements
+numbered 0..n-1 in a fixed creation order, each element's origin restricted
+to an earlier-numbered element or null. That gives `n!` forests (720 at
+n=6) — internally consistent, but not what "origin forest" means. It
+conflates two independent constraints: *acyclicity* (what makes a parent
+assignment a forest at all) and *causal deliverability* (which is correctly
+a property of a *delivery order* being a valid linear extension, checked
+separately). Restricting origin choices to "earlier index" silently
+smuggled a causal-order assumption into the topology-generation step,
+undercounting real structures — e.g. at n=2 it produced 2 forests where 3
+actually exist (`{both roots}`, `{A parent of B}`, `{B parent of A}`; the
+first model couldn't reach "B parent of A" because it always treated
+element 0 as unconditionally rootable only, never a child).
+
+**Corrected model:** an origin forest on n labeled elements is any
+acyclic parent-assignment where each element points to *any* other element
+or null — no presupposed ordering. The count of these is the generalized
+Cayley formula for labeled rooted forests, `(n+1)^(n-1)`. Verified by direct
+enumeration against the formula for n=1..6 (`packages/crdt/research/
+origin-forest-search.mjs`): exact match at every n, including **16807 at
+n=6** — the number this project's own docs cite, reproduced exactly once
+the right model was found, not fitted to match.
+
+**Result, under the corrected model:** 18248 origin forests across n=1..6,
+each checked against 5 id-rank regimes (identity/monotonic, full reversal,
+and 3 seeded-random shuffles — not the full `n!` permutation space; stated
+as a representative sample, not silently presented as more exhaustive than
+it is), every valid causal delivery order per forest — 91,240
+(forest × id-regime) checks, **zero divergences**. ~2.2s to run. RGA's
+4-line merge rule, exactly as given in ARCH §2.3 with no subtree-boundary
+restriction, converges regardless of delivery order and regardless of
+whether the id total order tracks causal order.
+
+**Why this matters beyond confirming a citation:** this is the empirical
+basis for §2.1 and §3.2 of ARCH — "the counter is therefore not a Lamport
+clock and does not need to be" — which is what lets Step 7's state-vector
+sync use contiguous per-replica counters at all. If convergence had turned
+out to depend on monotonic ids, the wire-format argument at Step 7 would
+have needed a Lamport clock, which ARCH §3.2 explicitly says would break
+counter contiguity and make the state vector inexact. Nothing here is new
+relative to what ARCH already asserts; what's new is that it was checked
+again, independently, from a lost codebase, and reproduced the exact cited
+number rather than merely trusting it.
+
+**Harness verified non-vacuous, not just run:** confirmed 3 fully-concurrent
+elements have 3! = 6 valid delivery orders (the delivery-order dimension
+actually varies); confirmed id-rank actually changes placement for a fixed
+forest and delivery order (monotonic vs. reversed ids give different
+results — id order is not inert); confirmed three different delivery
+orders of the same forest+ids converge to the identical result (the actual
+claim, shown concretely, not just counted in aggregate). All three are now
+committed tests, not just a conversation transcript.
+
+**Committed as `packages/crdt/research/origin-forest-search.mjs` plus
+`origin-forest-search.test.mjs`**, wired into the real test suite (`vitest`
+now includes `packages/*/research/**/*.{test,spec}.*`) rather than left as
+a throwaway script — it reproduces a specific historical number (16807)
+that would otherwise silently rot back into "trust the doc," and a future
+change to the merge-rule model belongs under a regression check same as
+anything else load-bearing.
+
+Per instruction: no merge rule, `ArrayDoc`, or fast-check property tests
+were written this session. This is prerequisite verification for Step 3,
+not Step 3 itself.
