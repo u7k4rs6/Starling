@@ -1000,3 +1000,81 @@ gated.
 243 tests (22 new: 3 in `packages/crdt/src/encoding.test.ts` for
 `decodeOpsStream`, 19 across `packages/provider`'s three test files).
 Lint, typecheck, and both gates clean.
+
+## 0021 — Step 10: offline-first integration test, real relay + real IndexedDB; the runtime prediction held, the build-graph friction was a genuine surprise
+
+Added `packages/provider/src/offline-first.test.ts`: the same "offline
+edits survive reload and reconcile on reconnect" scenario Step 9 already
+proved against in-process doubles, rebuilt against the real things — a
+real `createRelayServer` (`packages/relay`, bound to `127.0.0.1:0`, real
+HTTP) and real `IndexedDbPersistence` (backed by `fake-indexeddb`, the
+same implementation Step 9's `persistence.test.ts` already exercises
+directly, not a new mock). Two replicas, two independent
+`IndexedDbPersistence`/`HttpRelayTransport` pairs, one shared real relay:
+A writes "hello" offline, reloads (new `Provider`, same doc id, same
+fake-IndexedDB backing store), reconnects and pushes over real HTTP; B
+pulls and sees "hello"; B appends "!" and pushes; A pulls it back. Stated
+the prediction in the test file itself before running: since `Provider`'s
+logic, `HttpRelayTransport` against a real server, and `IndexedDbPersistence`
+against a real IndexedDB API were each independently verified in Steps 8
+and 9, assembling them should reproduce the doubles' result exactly, with
+no new algorithmic finding to make here — this step is about the pieces
+fitting together, not about discovering new behavior. Ran clean first
+try; mutation-tested it anyway rather than trust a first green run alone
+(commented out the reconnect call and the pendingCount assertion after
+it) — the reconciliation assertion failed exactly as predicted (`b.text`
+empty instead of `"hello"`, since nothing had reached the relay), then
+reverted the mutation. The runtime prediction held without qualification.
+
+**What wasn't predicted: `tsc -b`'s project-boundary enforcement, not a
+CRDT or sync-loop question at all.** The test imports `createRelayServer`
+from `packages/relay/src/server.js` via a relative path — deliberately
+not a package dependency; ARCH §1's graph has no `provider → relay` edge
+and adding one as even a devDependency would misstate what a browser
+bundle of `provider` needs. That relative import runs fine under Vitest
+(esbuild transpiles per-file, no project-reference awareness), but
+`tsc -b` — used for the real `pnpm run typecheck`, not Vitest — enforces
+that every file a composite project's sources reach must live under that
+project's own `rootDir`; reaching into `packages/relay/src` from inside
+`packages/provider/src`'s build failed with `TS6059`/`TS6307`. This
+wasn't something reasoned about in advance and confirmed — it surfaced
+directly as the typecheck failure, the honest order of events. Root
+cause once seen: `tsc -b`'s composite-project model and a plain relative
+import crossing a package boundary are fundamentally in tension, same
+family of problem `packages/crdt/tsconfig.test.json` already exists to
+solve (Step 7/Step 8 era) for a different reason (relaxed lib/types for a
+test file, not a cross-package reach) — recognized the shape and reused
+the pattern rather than inventing a new one: excluded
+`src/offline-first.test.ts` from `packages/provider/tsconfig.json`'s main
+build, and added a standalone `packages/provider/tsconfig.test.json`
+(`composite: false`, `noEmit: true`, including that one test file plus
+`packages/relay/src/**/*.ts` minus relay's own test files) run as a third
+step in the root `typecheck` script. `packages/provider/package.json`
+still declares only `starling-crdt` — the dependency graph itself never
+changed, only what the standalone typecheck pass is allowed to *see*.
+
+**Where the test lives, and why not a new top-level `tests/` package.**
+Considered a root-level `tests/integration/` directory (parallel to
+`packages/` and `tools/`) before writing this. Rejected empirically, not
+on style grounds: pnpm's default workspace linking is strict (no
+hoisting to the root `node_modules` for a package's own deps), confirmed
+by checking that `fake-indexeddb` — a real devDependency of
+`packages/provider` — isn't resolvable from the repo root at all
+(`ls node_modules/fake-indexeddb` — not found; only inside
+`packages/provider/node_modules/fake-indexeddb`, symlinked there for
+that package specifically). A test file physically outside any package
+couldn't resolve `import "fake-indexeddb/auto"` by bare specifier without
+either becoming a new declared workspace package (a 7th package outside
+ARCH §1's six-package graph — real scope creep for a single test file)
+or falling back to a deep relative import into another package's
+`node_modules` (fragile, and exactly the kind of thing gate 1's own
+grep-ban on indirection would frown on in spirit even where it doesn't
+literally apply). Placing the file inside `packages/provider/src/`
+sidesteps both: every bare specifier it needs (`starling-crdt`,
+`fake-indexeddb`) already resolves correctly there, and only the one
+cross-package relative import (`createRelayServer`) needed the
+`tsc -b` workaround above.
+
+244 tests (1 new). Lint, typecheck (all three steps), and both gates
+clean; `gate:relay-ignorance` only scans `packages/relay/src`, so a test
+elsewhere importing from it doesn't touch that gate's scope at all.
