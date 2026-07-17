@@ -4,3 +4,5 @@ export type { Op } from "./sequence.js";
 export { Sequence } from "./sequence.js";
 export { NaiveDoc } from "./naive-doc.js";
 export type { NaiveOp, NaivePayload } from "./naive-doc.js";
+export { ArrayDoc } from "./array-doc.js";
+export type { InsertOp, InsertPayload } from "./array-doc.js";
