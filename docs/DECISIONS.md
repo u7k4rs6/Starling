@@ -841,3 +841,56 @@ ArrayDoc/RgaDoc ratio at one n, this one for total encoded size) — worth
 naming as a pattern: a test asserting "this specific number" should assert
 a number the code being tested actually determines, not one a human
 free-hand estimated from an unrelated quantity.
+
+## 0019 — Step 8: `packages/relay`, append-only log with cursor; a real bug this time, not a bad assertion — `req.destroy()` on an oversized body killed the connection before the 413 could be written
+
+Built `LogStore` (UUID-validated doc ids, append/read with sequential
+byte offsets, the three SECURITY §2.1 resource bounds — 1MB/message,
+50MB/doc log frozen not evicted once reached, 10,000 docs with LRU
+eviction — plus disk persistence and `replayFromDisk`), `RateLimiter`
+(sliding window, injectable clock), `ConnectionLimiter` (per-IP count),
+and `createRelayServer` (plain `node:http`, zero dependencies, per ARCH
+§5). Gate 2 (relay ignorance) was the thing at risk here — every file was
+written checking each addition against the ban list as it went, rather
+than writing first and hoping the gate would catch it after.
+
+Unlike the last three log entries, this one is a genuine implementation
+bug, not a hand-estimated assertion. `readBodyWithCap` capped body size
+by calling `req.destroy()` the moment `total > maxBytes`, on the
+reasoning that destroying the stream stops it from doing any more work.
+An integration test posting a body one byte over `MAX_MESSAGE_BYTES` and
+asserting a 413 response failed instead with `fetch failed` /
+`SocketError: other side closed` — the client never got a response at
+all. Traced: `req` (`IncomingMessage`) and `res` (`ServerResponse`) share
+the same underlying `Socket`; `destroy()` on the request tears down that
+socket immediately, so by the time `handleRequest` tries to
+`res.writeHead(413, ...)` there is no connection left to write to. The
+cap was doing its one real job — refusing to accumulate more than
+`maxBytes` in the `chunks` array, which is the actual OOM protection —
+but destroying the transport was an unrelated and wrong way to enforce
+it. Fixed by dropping `destroy()`: on overflow, set a `rejected` flag,
+stop pushing further chunks (so memory use still stays capped) and reject
+the promise, but leave the socket alone so `handleRequest` can write the
+413 normally. The remaining request bytes are drained by the still-live
+`data` listener and discarded — cheap, and the connection closes normally
+once the client finishes sending. Left a comment on this at the fix site,
+since a future reader's first instinct (mine included, ten minutes
+earlier) is the same wrong "destroy stops the attack" reasoning; SECURITY
+§4 already scopes bandwidth/CPU exhaustion beyond the memory cap as
+out-of-bounds for a demo relay, so nothing further is owed here.
+
+Full suite (crdt + sim + relay): 221 tests, all green, including the
+now-passing 413 case. Both gates re-run clean. One live smoke check on
+gate 2 before committing: temporarily added a function named
+`isTombstone` to `packages/relay/src/index.ts` and confirmed the gate
+still passed — read `relay-ignorance.mjs` afterward to check this wasn't
+a false negative rather than assume it: the check is
+`codeText.includes(needle)` against the literal, lowercase `"tombstone"`,
+and `isTombstone` contains `"Tombstone"` (capital T), which is a
+different string under `includes`. Not a gate weakness worth fixing —
+`isTombstone` was a name I made up for the probe, not something a relay
+implementation would plausibly need — but worth confirming by reading the
+gate rather than guessing, since "the gate looked lenient" and "the gate
+is lenient" are not the same claim. Reverted the file; `git status`
+afterward showed only the intended two-line `index.ts` diff plus the new
+relay files, nothing left from the probe.
