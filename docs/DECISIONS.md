@@ -1175,3 +1175,91 @@ TTL filter broke both TTL tests. Both reverted before committing.
 7 in `packages/provider/src/awareness.test.ts`). Lint, typecheck, and
 both gates clean — the anchor code adds no ambient time/randomness/DOM
 reference, so gate 1 was never at risk from this step.
+
+## 0023 — Step 12: ProseMirror binding (`packages/editor`), headless; a scaffold-guess dependency corrected, and a third instance of the "independently-built docs aren't the same doc" test bug
+
+Built the whole of FRONTEND §1: a minimal single-paragraph, no-marks
+`Schema` (`schema.ts`) matching the CRDT's own flat-character-sequence
+model one to one; `positions.ts` (`pmPosToVisibleIndex`/
+`visibleIndexToPmPos`, the one place visible-index/PM-position
+conversion happens, per FRONTEND §1.2's "visible indices exist only at
+the boundary, and die inside it"); and `binding.ts`
+(`transactionToOps`, `opsToSteps`, `pmDocFromDoc`, `pmPosToAnchor`/
+`anchorToPmPos` for §1.3's anchor-based selection). All of it runs
+against plain `prosemirror-model`/`-state`/`-transform` — no
+`prosemirror-view`, no DOM, no jsdom — satisfying F1 by dependency
+absence rather than test-environment discipline (checked directly: a
+test imports `"prosemirror-view"` via a non-literal specifier — a
+literal would make `tsc` try to resolve it at typecheck time, defeating
+the point — and asserts the import rejects, since `packages/editor`'s
+own `node_modules` genuinely has no such symlink).
+
+**Corrected a Step 0 scaffold guess: `packages/editor` depends on
+`starling-crdt` directly, not `@starling/provider`.** ARCH §1's diagram
+(`demo → editor → provider → crdt`) was read literally at Step 0 and
+`packages/editor/package.json` was scaffolded with `@starling/provider`
+as its only workspace dependency. Building the actual binding surfaced
+that it doesn't touch `Provider` at all — `transactionToOps`/`opsToSteps`
+work directly against a `Doc` (calling `insertLocal`/`deleteLocal`/
+`receive`/`anchorAt`/`resolveAnchor`, none of which `Provider` exposes;
+its own surface is deliberately narrow and network-focused, ARCH §6).
+Read the graph's own separately-stated `sim → crdt` edge (outside the
+main `demo → editor → provider → crdt` chain) as precedent that a
+skip-level edge is allowed when a package's actual job needs it — `sim`
+needs raw CRDT types for the same reason `editor` does here, and neither
+is a violation of "strictly downward," only same-direction shortcuts.
+Removed the unused `@starling/provider` dependency and its matching
+`tsconfig.json` project reference, added `starling-crdt` and a reference
+to `../crdt` instead. (`Provider` and the editor binding remain two
+separate consumers of one shared `Doc` instance — wiring them together
+is Step 14's job, not this one's.)
+
+**`opsToSteps` integrates and computes each op's position one at a time,
+not the whole batch up front — reasoned out before writing it, not found
+by a failing test.** Each PM step's position must be expressed relative
+to the PM document *as the caller's own steps-so-far have built it up*,
+but `Doc.resolveAnchor` always reflects the *entire* current tree. Pre-
+integrating a whole remote batch before computing any positions would
+make an early op's computed position already account for a later op's
+insertion — correct against the CRDT's final state, wrong against the
+partially-rebuilt PM document at the point that early step is actually
+applied. Interleaving `doc.receive(op)` with position computation, one
+op at a time, keeps the two document representations in lockstep at
+every intermediate point, not just at the end. Documented as a
+precondition rather than defended against: ops must arrive in
+dependency-satisfying order, which every existing producer of a CRDT op
+stream in this codebase (`Sequence.log`, `missingFrom`, `decodeOpsStream`)
+already guarantees by construction (DECISIONS #0006, #0020) — an op
+handed to `opsToSteps` out of that order is the caller's bug, and
+`resolveAnchor` throwing on an unintegrated id is the same "fail loudly,
+not softly" behavior `insertBefore` already has elsewhere in `Doc`.
+
+**A third instance of the "two independently-built docs aren't the same
+document" test bug (see #0022) — this time in a delete test, and the
+sharpest version yet.** A test built `a` and `b` as two *separate* `Doc`s
+that each independently typed "hello" via their own local inserts,
+producing entirely different `ElemId`s per replica despite rendering
+identical text, then tried to replay one of `a`'s delete ops (naming an
+`a`-specific target id) into `b`. `resolveAnchor` correctly threw "id not
+found" — not a binding bug, a test bug: a delete op only means anything
+to a replica that has already integrated the specific insert it targets,
+and two replicas typing the same string independently never do. Fixed by
+having `b` receive `a`'s insert ops first (`a.missingFrom(new Map())`,
+reused from DECISIONS #0020's "empty vector means everything" trick),
+*then* replaying the delete generated by a later transaction on `a`. This
+is now three occurrences of the same underlying mistake across two steps
+(#0022's two anchor tests, this one) — worth stating as a standing rule
+rather than re-deriving it per test from here on: **whenever a test needs
+two replicas to "have the same content," one must receive the other's
+actual ops; typing matching-looking text independently on each is never
+equivalent, no matter how obvious it looks in the assertion.**
+
+Mutation-tested the position boundary math (`visibleIndexToPmPos` off by
+one) before trusting the suite: broke 3 of the 11 binding tests exactly
+as expected (a step-application failure, a delete landing on the wrong
+character, the anchor test's resolved position off by one), confirming
+they're load-bearing and not passing for an unrelated reason. Reverted
+before committing.
+
+269 tests (11 new, all in `packages/editor/src/binding.test.ts`). Lint,
+typecheck, and both gates clean.

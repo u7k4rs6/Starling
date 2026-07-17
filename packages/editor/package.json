@@ -6,6 +6,9 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "dependencies": {
-    "@starling/provider": "workspace:*"
+    "prosemirror-model": "^1.25.11",
+    "prosemirror-state": "^1.4.4",
+    "prosemirror-transform": "^1.12.0",
+    "starling-crdt": "workspace:*"
   }
 }
