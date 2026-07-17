@@ -95,6 +95,148 @@ describe("Doc: single-replica structural correctness against a plain-array refer
   });
 });
 
+describe("Doc: anchors (ARCH §7, S10) — a cursor is an ElemId + side, not a number", () => {
+  it("S10, exactly as PRD §3 states it: a remote insert before an anchor moves the anchor's resolved position, not the anchor itself", () => {
+    // Prediction, stated before running: A's cursor sits at index 0 of
+    // "world" (immediately before 'w'). Before any remote activity,
+    // resolveAnchor must be 0. B then inserts "hello " (6 characters) at
+    // the very start, entirely before what A's cursor points at. Once A
+    // merges B's ops, the anchor must resolve to 6 — not because anyone
+    // told it to move, but because 6 live characters now precede the same
+    // 'w' it was always pointing at. If it stays at 0, resolution is
+    // treating the anchor as a stale index instead of an id.
+    //
+    // B receives A's "world" before typing, so its insert is causally
+    // anchored to the existing 'w' (a left-child of it, deterministically
+    // before it) rather than an independent root-level insert whose
+    // resulting order would depend on Fugue's id tie-break between two
+    // *unrelated* root insertions — a real document has one shared history
+    // to insert before, not two histories merging from scratch.
+    const a = new Doc("A");
+    const opsWorld = [..."world"].map((ch) => a.insertLocal(a.text.length, ch));
+    const cursor = a.anchorAt(0);
+    expect(a.resolveAnchor(cursor)).toBe(0);
+
+    const b = new Doc("B");
+    for (const op of opsWorld) b.receive(op);
+    const opsB = [..."hello "].map((ch, i) => b.insertLocal(i, ch));
+    for (const op of opsB) a.receive(op);
+
+    expect(a.text).toBe("hello world");
+    expect(a.resolveAnchor(cursor)).toBe(6);
+  });
+
+  it("a remote insert after the anchor does not move it", () => {
+    // B's insert has to be causally anchored to A's own content (by
+    // having already received A's ops before typing) to land "after
+    // hello" at all — two replicas each independently root-inserting
+    // content have no causal relationship to each other, and where the
+    // two resulting root siblings land is decided by Fugue's id tie-break,
+    // not by which replica "typed first". An earlier version of this test
+    // had B build "!!!" from scratch with no knowledge of A's content and
+    // asserted the merge would land it after "hello" — that assumed an
+    // ordering the CRDT never promised, and only the specific tie-break
+    // (id "B" sorting before id "A" at a shared counter) made a *different*
+    // same-shaped test elsewhere in this file pass by coincidence. A test
+    // bug, not a Doc bug — logged as such rather than silently rewritten.
+    const a = new Doc("A");
+    const opsA = [..."hello"].map((ch) => a.insertLocal(a.text.length, ch));
+    const cursor = a.anchorAt(2); // between 'e' and 'l'
+    expect(a.resolveAnchor(cursor)).toBe(2);
+
+    const b = new Doc("B");
+    for (const op of opsA) b.receive(op);
+    const opsB = [..."!!!"].map((ch) => b.insertLocal(b.text.length, ch));
+    for (const op of opsB) a.receive(op);
+
+    expect(a.text).toBe("hello!!!");
+    expect(a.resolveAnchor(cursor)).toBe(2);
+  });
+
+  it("anchors survive tombstoning: deleting the anchored character itself still resolves to a sensible, stable position", () => {
+    const a = new Doc("A");
+    for (const ch of "abc") a.insertLocal(a.text.length, ch);
+    const cursorBeforeB = a.anchorAt(1); // before 'b'
+    const cursorAfterB = { id: cursorBeforeB.id, side: "after" as const }; // after 'b'
+    expect(a.resolveAnchor(cursorBeforeB)).toBe(1);
+    expect(a.resolveAnchor(cursorAfterB)).toBe(2);
+
+    a.deleteLocal(1); // delete 'b' — the tombstone stays in the tree
+    expect(a.text).toBe("ac");
+
+    // "immediately after the tombstone and immediately before it are the
+    // same visible position" (Doc.insertBefore's own comment) — both
+    // sides collapse to 1 once 'b' is no longer live.
+    expect(a.resolveAnchor(cursorBeforeB)).toBe(1);
+    expect(a.resolveAnchor(cursorAfterB)).toBe(1);
+  });
+
+  it("an end-of-document anchor stays pinned to the last character that existed when it was created, not to the live end", () => {
+    const a = new Doc("A");
+    for (const ch of "ab") a.insertLocal(a.text.length, ch);
+    const endAnchor = a.anchorAt(2); // past 'b', the live end at anchor time
+    expect(a.resolveAnchor(endAnchor)).toBe(2);
+
+    a.insertLocal(2, "c"); // appended after the anchor's target, not before it
+    expect(a.text).toBe("abc");
+    // The anchor is pinned to 'b' (side "after"), not to "wherever the
+    // document currently ends" — 'c' landing after 'b' doesn't move it.
+    expect(a.resolveAnchor(endAnchor)).toBe(2);
+  });
+
+  it("a boundary anchor on a genuinely empty document always resolves to 0", () => {
+    const a = new Doc("A");
+    const cursor = a.anchorAt(0);
+    expect(cursor.id).toBeNull();
+    expect(a.resolveAnchor(cursor)).toBe(0);
+  });
+
+  it("rejects an out-of-range visible index the same way insertLocal/deleteLocal do", () => {
+    const a = new Doc("A");
+    for (const ch of "ab") a.insertLocal(a.text.length, ch);
+    expect(() => a.anchorAt(-1)).toThrow(RangeError);
+    expect(() => a.anchorAt(3)).toThrow(RangeError); // length is 2; 0..2 are valid
+  });
+
+  it("property: anchorAt and resolveAnchor are exact inverses immediately after creation, across random tree shapes", () => {
+    // anchorAt does index-to-node (top-down, via nodeAtVisibleIndex);
+    // resolveAnchor does node-to-count (countLiveBefore, a differently-
+    // shaped walk that stops at the first match). They must agree at
+    // every position for every tree the random insert/delete sequence
+    // below can produce — this is two independently-implemented
+    // traversals checking each other, not one algorithm confirming itself.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.oneof(
+            fc.record({ kind: fc.constant("insert" as const), rawIndex: fc.nat({ max: 40 }), char: fc.char() }),
+            fc.record({ kind: fc.constant("delete" as const), rawIndex: fc.nat({ max: 40 }) })
+          ),
+          { minLength: 0, maxLength: 60 }
+        ),
+        (ops) => {
+          const doc = new Doc("A");
+          let liveLength = 0;
+          for (const op of ops) {
+            if (op.kind === "insert") {
+              const index = Math.min(op.rawIndex, liveLength);
+              doc.insertLocal(index, op.char);
+              liveLength += 1;
+            } else if (liveLength > 0) {
+              doc.deleteLocal(op.rawIndex % liveLength);
+              liveLength -= 1;
+            }
+          }
+          for (let i = 0; i <= liveLength; i += 1) {
+            expect(doc.resolveAnchor(doc.anchorAt(i))).toBe(i);
+          }
+        }
+      ),
+      { numRuns: 500 }
+    );
+  });
+});
+
 function permutations<T>(arr: T[]): T[][] {
   if (arr.length <= 1) return [arr];
   const result: T[][] = [];

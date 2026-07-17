@@ -110,6 +110,60 @@ function nodeAtVisibleIndexWithin(node: FugueNode, remaining: number): FugueNode
   return nodeAtVisibleIndex(node.right, rest) as FugueNode;
 }
 
+/** Which visible position, relative to the anchored character, the cursor
+ * sits at: immediately before it, or immediately after it. Once a
+ * character is tombstoned the two collapse to the same visible position
+ * (ARCH §7 — the tombstone still holds the position; `insertBefore`'s own
+ * comment above notes the identical collapse for the same reason). */
+export type AnchorSide = "before" | "after";
+
+/**
+ * ARCH §7: "A cursor is not an index, it is an ElemId plus a side... When
+ * a remote user inserts text above your cursor, your cursor does not
+ * move, because it was never at a number." `id: null` is the one genuine
+ * exception — there is no character to point at in a document with no
+ * live content yet, so a boundary anchor on an empty doc always resolves
+ * to 0 rather than pointing at anything.
+ */
+export type Anchor = { id: ElemId | null; side: AnchorSide };
+
+/**
+ * Count of live (non-tombstoned) nodes strictly before `target` in the
+ * tree's in-order sequence — the same in-order walk `text` and
+ * `nodeAtVisibleIndex` already use, run in the opposite direction (id to
+ * position instead of position to id). O(n) worst case, same
+ * correctness-first posture as the rest of `Doc` (see the class doc
+ * comment) — an order-statistic treap would make this O(log n), and
+ * Step 6 already scoped that out for Doc (DECISIONS #0017).
+ *
+ * Returns `null` while still searching (target not yet found in this
+ * subtree/forest) so the caller can short-circuit instead of walking
+ * the rest of the tree once the answer is known.
+ */
+function countLiveBefore(forest: FugueNode[], target: FugueNode): number | null {
+  let acc = 0;
+  for (const node of forest) {
+    const leftCount = countLiveBefore(node.left, target);
+    if (leftCount !== null) return acc + leftCount;
+    // node.left is fully accounted for by this point (not where target
+    // was found) — its live size precedes `node` in-order regardless of
+    // whether `node` itself turns out to be the target, so it must be
+    // folded into `acc` before the target check below, not after. Missing
+    // this was a real bug (found by the round-trip property test, not
+    // reasoned out in advance): every hand-traced case before writing this
+    // function happened to have an empty left bucket at the target node,
+    // so undercounting a target's own live left bucket never showed up
+    // until a property-generated tree had one.
+    acc += bucketLiveSize(node.left);
+    if (node === target) return acc;
+    if (!node.deleted) acc += 1;
+    const rightCount = countLiveBefore(node.right, target);
+    if (rightCount !== null) return acc + rightCount;
+    acc += bucketLiveSize(node.right);
+  }
+  return null;
+}
+
 /**
  * Museum survivor (PRD §4): Fugue over a tree, differing from `RgaDoc`'s
  * merge rule by tracking, per element, which side of its origin it was
@@ -194,6 +248,48 @@ export class Doc extends Sequence<CrdtPayload> {
     const node = nodeAtVisibleIndex(this.rootChildren, visibleIndex);
     if (!node) throw new RangeError(`visible index ${visibleIndex} out of range`);
     return this.recordLocalOp({ type: "delete", target: node.id }, [node.id]);
+  }
+
+  private liveLength(): number {
+    return bucketLiveSize(this.rootChildren);
+  }
+
+  /** ARCH §7 / S10: pin a cursor to whichever character currently sits at
+   * `visibleIndex`, not to the number itself. `visibleIndex` may equal the
+   * document's current live length (cursor at the very end): there is no
+   * character *at* that position to point "before", so the anchor instead
+   * points *after* the last live character — still a specific id, not a
+   * number, so a later insert past the live end doesn't drag this anchor
+   * along with it. Only a genuinely empty document has no character at
+   * all to anchor to (`id: null`, see `Anchor`). */
+  anchorAt(visibleIndex: number): Anchor {
+    const length = this.liveLength();
+    if (!Number.isInteger(visibleIndex) || visibleIndex < 0 || visibleIndex > length) {
+      throw new RangeError(`visible index ${visibleIndex} out of range`);
+    }
+    const atIndex = nodeAtVisibleIndex(this.rootChildren, visibleIndex);
+    if (atIndex !== null) return { id: atIndex.id, side: "before" };
+    if (length === 0) return { id: null, side: "before" };
+    const last = nodeAtVisibleIndex(this.rootChildren, length - 1)!;
+    return { id: last.id, side: "after" };
+  }
+
+  /** The anchor's *current* visible index — recomputed from the tree's
+   * present shape every call, never cached, because the whole point (ARCH
+   * §7) is that it can change out from under the caller as remote ops
+   * arrive. Deliberately does not special-case an id this replica has
+   * never seen: `nodeForId` throws, same as `insertBefore` does for an
+   * unresolvable tombstone id — an anchor is only ever meaningful relative
+   * to ops this replica has actually integrated. */
+  resolveAnchor(anchor: Anchor): number {
+    if (anchor.id === null) return 0;
+    const node = this.nodeForId(anchor.id);
+    // Guaranteed non-null: every node reachable via `byId` was spliced
+    // into this same tree by `integrate`, in the same call — the two
+    // never drift apart, so a node `nodeForId` found is always findable
+    // by `countLiveBefore`'s walk of `this.rootChildren` too.
+    const before = countLiveBefore(this.rootChildren, node) as number;
+    return anchor.side === "after" ? before + (node.deleted ? 0 : 1) : before;
   }
 
   protected integrate(op: CrdtOp): void {

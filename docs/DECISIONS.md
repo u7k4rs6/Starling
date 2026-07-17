@@ -1078,3 +1078,100 @@ cross-package relative import (`createRelayServer`) needed the
 244 tests (1 new). Lint, typecheck (all three steps), and both gates
 clean; `gate:relay-ignorance` only scans `packages/relay/src`, so a test
 elsewhere importing from it doesn't touch that gate's scope at all.
+
+## 0022 — Step 11: anchors (S10) + awareness; a real bug in new code, caught by the property test my own hand-trace failed to anticipate, plus two test-authoring bugs from the same wrong assumption
+
+Added `Anchor`/`AnchorSide` and `Doc.anchorAt`/`Doc.resolveAnchor` (ARCH
+§7 / S10: "a cursor is not an index, it is an ElemId plus a side"),
+and `packages/provider`'s `AwarenessClient` (ARCH §7's ephemeral
+presence: LWW per replica, TTL, never persisted, never in the op log,
+over "the same relay, on a separate channel").
+
+**`countLiveBefore` had a real bug, found by the property test, not
+predicted in advance.** Before writing it, hand-traced the intended
+algorithm (walk the tree, accumulate live counts strictly before a
+target node) against three cases — mid-chain, first node, a tombstoned
+node — all using a flat right-child chain with no non-empty left
+buckets anywhere near the target, and all confirmed correct by hand.
+Wrote the code, wrote a round-trip property test (`resolveAnchor(anchorAt(i))
+=== i` for every valid `i`, across trees produced by 500 random
+insert/delete sequences), and it failed on the very first shrunk
+counterexample: two inserts of the same character both at index 0 (a
+2-node left-leaning chain). Root cause: the function added a node's own
+left-bucket live count to the running total *after* checking whether that
+node was the target, so a target whose own left bucket held live content
+returned the accumulated total from *before* that content was counted —
+undercounting by exactly the live size of the target's own left bucket.
+Every hand-traced case had an empty left bucket sitting under the target,
+so the bug was invisible to hand-verification and would have shipped
+silently without the property test; fixed by moving the
+`acc += bucketLiveSize(node.left)` line before the `node === target`
+check, re-verified by hand against the original three traces (unaffected,
+since they all had empty left buckets — the reorder is a no-op exactly
+where the original reasoning was checked, and the fix exactly where it
+wasn't) and against the counterexample (now returns the correct 1, not
+0). This is the pattern the whole session has been watching for in the
+opposite direction — DECISIONS #0013/#0014/#0018/#0021 all found a wrong
+*test* assertion and confirmed the *implementation* was fine; this is the
+first Step in a while where the property test caught the implementation
+being wrong instead, which is exactly what a property test is for and
+worth naming as a genuine positive result, not just noting the bug.
+
+**Two test-authoring bugs from the same wrong assumption, found while
+writing (not from the property test) — logged rather than quietly fixed
+in place, per the standing pattern.** Two hand-written anchor tests had
+two independent `Doc` instances each build content from scratch (one
+"world", one "hello ") with no causal relationship to each other, then
+merged, asserting the merged order matched real-world intuition ("hello"
+should end up before "world" since it was meant to represent an insert
+happening first"). That assumption is false: two *independent* root-level
+insertions have no causal order, so Fugue's id tie-break (not arrival,
+not intent) decides where they land relative to each other. One test
+happened to pass anyway, because the specific replica names chosen
+("B" sorting after "A") produced the tie-break result the test wanted by
+coincidence, not because the reasoning was right. A second test built the
+mirror-image scenario with the same flawed setup and got the *other*
+tie-break outcome, failing outright and exposing the assumption. Fixed
+both by making the "remote" replica actually receive the first replica's
+ops *before* typing its own — the realistic shape of "insert relative to
+existing content" (one shared history, not two independently-built ones
+merging) and the only way to get a deterministic before/after relationship
+out of Fugue at all, since `insertLocal`'s origin is always relative to
+whatever that replica has already integrated.
+
+**Awareness's wire format is newline-delimited JSON, not the crdt
+package's binary encoding, and that's a deliberate scope boundary, not
+an oversight.** ARCH §3.1's byte-budget concern (the 60k-deletions
+target, LEB128 varints, a hand-rolled UTF-8 codec) is specifically about
+the CRDT op log, whose per-character cost matters. Presence pings don't
+have that volume, so NDJSON's simplicity (self-delimiting via `\n`, no
+custom framing needed, unlike the concatenated-blob problem
+`decodeOpsStream` exists to solve for the content channel — see #0020)
+was chosen over reusing or extending the crdt wire format for a payload
+shape that format was never designed for. "Never persisted" was enforced
+structurally rather than tested: `AwarenessClient` has no
+`Persistence`-shaped constructor argument at all, so there is nothing to
+assert an absence of.
+
+**Channel-id selection for awareness is the caller's responsibility, left
+unresolved on purpose.** ARCH §7 says awareness travels "over the same
+relay, on a separate channel" but doesn't say how that channel's id
+relates to the content doc's id, and the relay validates every id as a
+strict UUID (SECURITY §2.2) — `${docId}:awareness}` is not a valid one.
+Considered deriving a second UUID deterministically from the first
+(bit-twiddling a fixed nibble) and rejected it: ARCH specifies no such
+scheme, and inventing one now would be exactly the kind of undocumented
+design decision this log exists to flag, for a problem that has an
+obviously simpler answer — a caller (the demo app, Step 14) can just mint
+and store a second UUID alongside the first. `AwarenessClient` takes
+whatever `RelayTransport` it's given, same as `Provider`'s content sync.
+
+Mutation-tested both of `AwarenessClient`'s non-obvious behaviors before
+trusting green: disabling the LWW timestamp comparison (`|| true`)
+broke exactly the out-of-order test designed to catch it; disabling the
+TTL filter broke both TTL tests. Both reverted before committing.
+
+258 tests (14 new: 7 anchor tests in `packages/crdt/src/fugue-doc.test.ts`,
+7 in `packages/provider/src/awareness.test.ts`). Lint, typecheck, and
+both gates clean — the anchor code adds no ambient time/randomness/DOM
+reference, so gate 1 was never at risk from this step.
