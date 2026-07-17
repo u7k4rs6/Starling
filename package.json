@@ -11,7 +11,12 @@
     "test": "vitest run",
     "gate:core-isolation": "node tools/gates/core-isolation.mjs",
     "gate:relay-ignorance": "node tools/gates/relay-ignorance.mjs",
-    "gates": "pnpm run gate:core-isolation && pnpm run gate:relay-ignorance"
+    "gates": "pnpm run gate:core-isolation && pnpm run gate:relay-ignorance",
+    "bench:cold-open": "node bench/cold-open.mjs",
+    "bench:encode-decode": "node bench/encode-decode.mjs",
+    "bench:memory": "node bench/memory.mjs",
+    "bench:yjs": "node bench/yjs-comparison.mjs",
+    "bench": "pnpm run bench:cold-open && pnpm run bench:encode-decode && pnpm run bench:memory && pnpm run bench:yjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -19,8 +24,10 @@
     "eslint": "^9.17.0",
     "fast-check": "^3.23.1",
     "globals": "^15.14.0",
+    "starling-crdt": "workspace:*",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.1",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "yjs": "^13.6.31"
   }
 }

@@ -1,7 +1,9 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import type { ElemId } from "./elem-id.js";
 import { runConvergencePropertyTests, runDocContractTests } from "./doc-contract.test-helpers.js";
 import { Doc } from "./fugue-doc.js";
+import type { CrdtOp } from "./ops.js";
 
 runDocContractTests("Doc (Fugue, the survivor)", (replica) => new Doc(replica));
 runConvergencePropertyTests("Doc (Fugue, the survivor)", (replica) => new Doc(replica));
@@ -276,6 +278,62 @@ describe("Doc: deleteById / charForId (ARCH §2.4/§8 — undo operates on ids, 
     a.deleteById(op.id);
     expect(a.text).toBe("");
     expect(a.charForId(op.id)).toBe("q"); // the tombstone still remembers
+  });
+});
+
+describe("Doc: no stack overflow on a long single-sided chain (DECISIONS #0026)", () => {
+  // A replica typing forward without pause builds a tree that is one long
+  // right-child chain — depth equal to length. `inOrderWalk` (the `.text`
+  // getter), `nodeAtVisibleIndex` (`insertLocal`/`anchorAt`), and
+  // `countLiveBefore` (`resolveAnchor`) were all originally recursive, one
+  // stack frame per character; found via bench/cold-open.mjs, not reasoned
+  // out in advance, that all three crashed (`RangeError: Maximum call
+  // stack size exceeded`) well under 30,000 characters.
+  //
+  // Ops are built directly (not via sequential `insertLocal` calls on a
+  // live `Doc`, which additionally pay `originForVisibleIndex`'s own
+  // O(depth) search per call) and fed in through `receive()` instead —
+  // but `receive()` isn't free either: `integrate()` calls
+  // `propagateSizesUp` on every op, which walks from the new node to the
+  // tree root, and on a single-sided chain that walk is itself O(depth).
+  // Building an n-character chain this way is therefore O(n²) regardless
+  // of which path builds it (this is *why* `Doc` loses to `ArrayDoc` on
+  // this exact workload shape — bench/README.md; a genuine, already-
+  // accepted-as-out-of-scope-for-Step-15 characteristic, not something
+  // this fix introduced). n is kept at 20,000 — comfortably inside the
+  // "crashes well under 30,000" zone this fix was built against, without
+  // asking every CI run to pay the O(n²) cost a much larger n would cost
+  // for no additional confidence that the fix works.
+  function forwardChainOps(replica: string, n: number): CrdtOp[] {
+    const ops: CrdtOp[] = [];
+    let prev: ElemId | null = null;
+    for (let i = 0; i < n; i += 1) {
+      const id: ElemId = { replica, counter: i };
+      ops.push({ id, deps: prev === null ? [] : [prev], payload: { type: "insert", l: prev, char: "x", side: "R" } });
+      prev = id;
+    }
+    return ops;
+  }
+
+  it("building, reading, appending to, and anchoring within a 20,000-character forward chain all complete without throwing", () => {
+    const n = 20_000;
+    const ops = forwardChainOps("W", n);
+
+    const doc = new Doc("R");
+    for (const op of ops) doc.receive(op);
+
+    // inOrderWalk, over the whole chain.
+    expect(doc.text).toBe("x".repeat(n));
+
+    // nodeAtVisibleIndex, at maximum depth: appending past the live end.
+    doc.insertLocal(n, "y");
+    expect(doc.text).toBe(`${"x".repeat(n)}y`);
+
+    // countLiveBefore, at maximum depth: anchoring at (and resolving) the
+    // last original character, requiring a walk across nearly the whole
+    // chain to count what precedes it.
+    const anchor = doc.anchorAt(n - 1);
+    expect(doc.resolveAnchor(anchor)).toBe(n - 1);
   });
 });
 

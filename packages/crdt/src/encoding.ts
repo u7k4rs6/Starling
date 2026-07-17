@@ -31,6 +31,24 @@ export function writeVarUint(out: number[], value: number): void {
   out.push(v);
 }
 
+/**
+ * `dest.push(...src)` is exactly this loop, except V8 rejects a spread (or
+ * `apply`) once `src` passes roughly 65,000-125,000 elements —
+ * `RangeError: Maximum call stack size exceeded`, because spread-into-call
+ * passes each element as its own argument, and the engine caps argument
+ * count, not recursion depth (this is a different mechanism than the
+ * fugue-doc.ts tree-recursion crash class, DECISIONS #0026, but the same
+ * *shape* of bug: an array operation whose cost was assumed to scale with
+ * array length turns out to have a hidden cliff at a specific size).
+ * `encodeOps`/`decodeOpsStream` both build one number/one op per input op,
+ * so at benchmark scale (100,000 ops) both `out.push(...records)` and
+ * `ops.push(...decodeOpsFrom(...))` crashed — found via bench/encode-
+ * decode.mjs, not reasoned out in advance. Plain loop, no size limit.
+ */
+function pushAll<T>(dest: T[], src: readonly T[]): void {
+  for (let i = 0; i < src.length; i += 1) dest.push(src[i]!);
+}
+
 export function readVarUint(bytes: Uint8Array, pos: { i: number }): number {
   let result = 0;
   let multiplier = 1;
@@ -162,7 +180,7 @@ export function encodeOps(ops: CrdtOp[]): Uint8Array {
   for (const replica of table) {
     const strBytes = encodeUtf8(replica);
     writeVarUint(out, strBytes.length);
-    out.push(...strBytes);
+    pushAll(out, strBytes);
   }
 
   const records: number[] = [];
@@ -209,13 +227,13 @@ export function encodeOps(ops: CrdtOp[]): Uint8Array {
     records.push(op.payload.side === "L" ? SIDE_L : op.payload.side === "R" ? SIDE_R : SIDE_ABSENT);
     const charBytes = encodeUtf8(op.payload.char);
     records.push(charBytes.length);
-    records.push(...charBytes);
+    pushAll(records, charBytes);
     recordCount += 1;
     i += 1;
   }
 
   writeVarUint(out, recordCount);
-  out.push(...records);
+  pushAll(out, records);
 
   return new Uint8Array(out);
 }
@@ -306,7 +324,7 @@ export function decodeOpsStream(bytes: Uint8Array): CrdtOp[] {
   const pos = { i: 0 };
   const ops: CrdtOp[] = [];
   while (pos.i < bytes.length) {
-    ops.push(...decodeOpsFrom(bytes, pos));
+    pushAll(ops, decodeOpsFrom(bytes, pos));
   }
   return ops;
 }

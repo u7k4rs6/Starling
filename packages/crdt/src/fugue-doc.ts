@@ -73,41 +73,80 @@ function insertIntoBucket(bucket: FugueNode[], node: FugueNode, side: Side): voi
   bucket.splice(i, 0, node);
 }
 
+/**
+ * Explicit-stack in-order traversal — not recursive. A tree built by one
+ * replica typing forward without pause is a single-sided chain whose
+ * depth equals its length; native recursion here means stack depth grows
+ * with document length, and real documents exceed JS's call-stack limit
+ * (`RangeError: Maximum call stack size exceeded`) well under 30,000
+ * characters — found via the Step 15 benchmark, not reasoned out in
+ * advance (DECISIONS #0026). Each `FugueNode`'s children are *arrays*
+ * (sibling buckets), not single pointers, so this isn't the textbook
+ * binary-tree iterative in-order walk: a work item is either "expand
+ * this forest" (push its nodes' left-bucket/self/right-bucket work items,
+ * in reverse array order so the first array entry ends up on top of the
+ * stack — a stack is LIFO, so reverse-pushing is what makes forward
+ * array order come out as forward pop order) or "visit this node".
+ */
+type WorkItem = { kind: "forest"; forest: FugueNode[] } | { kind: "visit"; node: FugueNode };
+
+function pushForestExpansion(stack: WorkItem[], forest: FugueNode[]): void {
+  for (let i = forest.length - 1; i >= 0; i -= 1) {
+    const node = forest[i]!;
+    stack.push({ kind: "forest", forest: node.right });
+    stack.push({ kind: "visit", node });
+    stack.push({ kind: "forest", forest: node.left });
+  }
+}
+
 function inOrderWalk(forest: FugueNode[], visit: (n: FugueNode) => void): void {
-  for (const node of forest) {
-    inOrderWalk(node.left, visit);
-    visit(node);
-    inOrderWalk(node.right, visit);
+  const stack: WorkItem[] = [{ kind: "forest", forest }];
+  while (stack.length > 0) {
+    const item = stack.pop()!;
+    if (item.kind === "visit") {
+      visit(item.node);
+    } else {
+      pushForestExpansion(stack, item.forest);
+    }
   }
 }
 
-/** Which top-level node's subtree contains the target visible index —
- * each node's own `liveSize` already covers its whole subtree, so this is
- * a plain linear scan across the forest, no subtraction-then-recheck. */
+/**
+ * Which node sits at `visibleIndex` — a single path down the tree (no
+ * branching search: at each step `liveSize`/bucket comparisons say
+ * exactly which child to descend into), so this only ever needed
+ * iteration, not the general in-order-walk machinery above. Folded what
+ * was two mutually-recursive functions (`nodeAtVisibleIndex` /
+ * `nodeAtVisibleIndexWithin`) into one loop for the same crash reason as
+ * `inOrderWalk` — same complexity as before (still O(chain length) time
+ * for a long single-sided run, just O(1) stack instead of O(chain
+ * length) stack), not a performance fix, a correctness one.
+ */
 function nodeAtVisibleIndex(forest: FugueNode[], visibleIndex: number): FugueNode | null {
+  let currentForest = forest;
   let remaining = visibleIndex;
-  for (const node of forest) {
-    if (remaining < node.liveSize) return nodeAtVisibleIndexWithin(node, remaining);
-    remaining -= node.liveSize;
-  }
-  return null;
-}
+  for (;;) {
+    let node: FugueNode | null = null;
+    for (const candidate of currentForest) {
+      if (remaining < candidate.liveSize) {
+        node = candidate;
+        break;
+      }
+      remaining -= candidate.liveSize;
+    }
+    if (node === null) return null;
 
-/** `remaining` is already known (by the caller) to be within `node`'s own
- * subtree — breaks it down as left bucket / node itself / right bucket. */
-function nodeAtVisibleIndexWithin(node: FugueNode, remaining: number): FugueNode {
-  const leftLive = bucketLiveSize(node.left);
-  if (remaining < leftLive) {
-    // Guaranteed non-null: remaining < leftLive means some left child's
-    // subtree contains it, by the same liveSize-scan argument as above.
-    return nodeAtVisibleIndex(node.left, remaining) as FugueNode;
+    const leftLive = bucketLiveSize(node.left);
+    if (remaining < leftLive) {
+      currentForest = node.left;
+      continue;
+    }
+    let rest = remaining - leftLive;
+    if (rest === 0 && !node.deleted) return node;
+    if (!node.deleted) rest -= 1;
+    currentForest = node.right;
+    remaining = rest;
   }
-  let rest = remaining - leftLive;
-  if (rest === 0 && !node.deleted) return node;
-  if (!node.deleted) rest -= 1;
-  // Guaranteed non-null for the same reason: rest is within node.right's
-  // combined liveSize because node.liveSize accounted for it upstream.
-  return nodeAtVisibleIndex(node.right, rest) as FugueNode;
 }
 
 /** Which visible position, relative to the anchored character, the cursor
@@ -129,39 +168,32 @@ export type Anchor = { id: ElemId | null; side: AnchorSide };
 
 /**
  * Count of live (non-tombstoned) nodes strictly before `target` in the
- * tree's in-order sequence — the same in-order walk `text` and
- * `nodeAtVisibleIndex` already use, run in the opposite direction (id to
- * position instead of position to id). O(n) worst case, same
- * correctness-first posture as the rest of `Doc` (see the class doc
- * comment) — an order-statistic treap would make this O(log n), and
- * Step 6 already scoped that out for Doc (DECISIONS #0017).
- *
- * Returns `null` while still searching (target not yet found in this
- * subtree/forest) so the caller can short-circuit instead of walking
- * the rest of the tree once the answer is known.
+ * tree's in-order sequence. Built on the same explicit-stack traversal
+ * `inOrderWalk` uses, for the same reason (DECISIONS #0026: a
+ * mutually-recursive version of this crashed past a few thousand
+ * characters on a single-sided chain) — walking node by node until
+ * `target` is found, rather than the earlier recursive version's
+ * `bucketLiveSize`-skip of whole sibling subtrees known not to contain
+ * it. That's a real, deliberately-accepted complexity trade: crash-safe
+ * and O(chain length) for the long-thin-chain shape that was actually
+ * crashing is what matters here, not preserving an O(1)-per-sibling
+ * shortcut for wide trees this function was never the bottleneck for
+ * (`resolveAnchor`, not the cold-open path `nodeAtVisibleIndex` serves).
+ * O(1) stack depth regardless, which is the property that matters.
  */
-function countLiveBefore(forest: FugueNode[], target: FugueNode): number | null {
+function countLiveBefore(forest: FugueNode[], target: FugueNode): number {
+  const stack: WorkItem[] = [{ kind: "forest", forest }];
   let acc = 0;
-  for (const node of forest) {
-    const leftCount = countLiveBefore(node.left, target);
-    if (leftCount !== null) return acc + leftCount;
-    // node.left is fully accounted for by this point (not where target
-    // was found) — its live size precedes `node` in-order regardless of
-    // whether `node` itself turns out to be the target, so it must be
-    // folded into `acc` before the target check below, not after. Missing
-    // this was a real bug (found by the round-trip property test, not
-    // reasoned out in advance): every hand-traced case before writing this
-    // function happened to have an empty left bucket at the target node,
-    // so undercounting a target's own live left bucket never showed up
-    // until a property-generated tree had one.
-    acc += bucketLiveSize(node.left);
-    if (node === target) return acc;
-    if (!node.deleted) acc += 1;
-    const rightCount = countLiveBefore(node.right, target);
-    if (rightCount !== null) return acc + rightCount;
-    acc += bucketLiveSize(node.right);
+  while (stack.length > 0) {
+    const item = stack.pop()!;
+    if (item.kind === "forest") {
+      pushForestExpansion(stack, item.forest);
+      continue;
+    }
+    if (item.node === target) return acc;
+    if (!item.node.deleted) acc += 1;
   }
-  return null;
+  throw new Error("Doc: countLiveBefore target not found in tree");
 }
 
 /**
@@ -307,11 +339,11 @@ export class Doc extends Sequence<CrdtPayload> {
   resolveAnchor(anchor: Anchor): number {
     if (anchor.id === null) return 0;
     const node = this.nodeForId(anchor.id);
-    // Guaranteed non-null: every node reachable via `byId` was spliced
-    // into this same tree by `integrate`, in the same call — the two
-    // never drift apart, so a node `nodeForId` found is always findable
-    // by `countLiveBefore`'s walk of `this.rootChildren` too.
-    const before = countLiveBefore(this.rootChildren, node) as number;
+    // countLiveBefore won't throw its "not found" error here: every node
+    // reachable via `byId` was spliced into this same tree by `integrate`,
+    // in the same call — the two never drift apart, so a node `nodeForId`
+    // found is always findable by `countLiveBefore`'s walk too.
+    const before = countLiveBefore(this.rootChildren, node);
     return anchor.side === "after" ? before + (node.deleted ? 0 : 1) : before;
   }
 

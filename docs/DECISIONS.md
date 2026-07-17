@@ -1531,3 +1531,209 @@ and both gates clean. The e2e suite itself isn't part of `pnpm run
 test`/CI's normal vitest run (Playwright, a different runner, a real
 browser) — run via `pnpm --filter @starling/demo run e2e`, documented
 here rather than silently absent from the numbers above.
+
+## 0026 — Step 15: benchmark suite finds two real crash bugs and one genuine, honestly-reported performance miss (`Doc` fails S6 by ~168x, loses to Yjs by ~36,800x on cold-open) — none of it fixed beyond the crashes, by design
+
+**Step:** 15
+
+Built `bench/` (`cold-open.mjs`, `encode-decode.mjs`, `memory.mjs`,
+`yjs-comparison.mjs`, this directory's own `README.md` with the committed
+numbers) per ARCH §9's checklist. Predicted going in, based on the S6
+gate already passing (`rga-doc.test.ts`, `RgaDoc`@100k, 412ms) and `Doc`
+being "the correctness-focused successor" to `RgaDoc`: `Doc` would be in
+the same ballpark, plausibly a bit slower from Fugue's extra tree-shape
+bookkeeping, but nowhere near a 1s target's order of magnitude. Wrong, in
+a way worth recording as a finding in its own right, distinct from the two
+crash bugs below.
+
+**Bug 1 (crash): `fugue-doc.ts`'s tree-walking functions were recursive,
+one stack frame per character, on the exact tree shape a real user
+produces by typing forward without pausing (a single-sided chain, depth =
+document length).** `nodeAtVisibleIndexWithin`/`nodeAtVisibleIndex`
+(`insertLocal`/`deleteLocal`/`anchorAt`), `inOrderWalk` (the `.text`
+getter), and `countLiveBefore` (`resolveAnchor`) all crashed
+(`RangeError: Maximum call stack size exceeded`) well under 30,000
+characters — found by a throwaway benchmarking script during this step,
+not reasoned out in advance, and not caught by any of the 288 existing
+tests because none of them build a document anywhere near that long.
+This is not a cold-open-only problem: `insertLocal` calls
+`nodeAtVisibleIndex` too, so a single replica typing a moderately long
+document *live* would have hit this, in production, with no remote peer
+involved at all. Fixed by rewriting all three as explicit-stack
+iteration (`WorkItem`/`pushForestExpansion` in `fugue-doc.ts`) —
+complexity-preserving (still O(chain length) per call), O(1) stack
+depth instead of O(chain length). Verified primarily by the existing
+26-test suite (including its 500-run property tests) passing unchanged
+after the rewrite, given this session's four prior wrong hand-derivations
+of Fugue behavior (#0022, #0023, #0024 ×2) — trusting the property tests
+to catch a semantic slip was judged more reliable than trusting a fifth
+hand-trace. `countLiveBefore`'s rewrite gives up the old recursive
+version's O(1)-skip-whole-uninteresting-sibling-subtree shortcut for a
+walk-every-node-until-found approach — an explicit, accepted complexity
+trade (crash-safety on the shape that was actually crashing, a long thin
+chain, matters more here than an optimization for wide trees this
+function was never the bottleneck for). A dedicated regression test
+(`fugue-doc.test.ts`, "no stack overflow on a long single-sided chain")
+now builds a 20,000-character forward chain — via directly-constructed
+ops fed through `receive()`, not 20,000 live `insertLocal` calls, to
+isolate "does the traversal blow the stack" from "how slow is a
+Doc-typing-forward workload" (that second question is this entry's next
+finding) — and exercises all three fixed functions at maximum depth.
+
+**Bug 2 (crash, same shape, different mechanism): `encoding.ts`'s
+`encodeOps`/`decodeOpsStream` used `dest.push(...src)` to concatenate
+arrays whose size scales with op count.** `out.push(...records)` crashed
+building `bench/encode-decode.mjs` at n=100,000 — V8 rejects a spread (or
+`apply`) call once the argument count passes roughly 65,000-125,000,
+because spread-into-call passes each element as its own call argument and
+the engine caps argument count, not recursion depth. Same underlying
+*shape* of bug as #1 above (an array/tree operation silently assumed to
+scale cleanly with input size turns out to have a hidden cliff at a
+specific size) via a different, unrelated mechanism — worth naming as a
+pattern, not a coincidence: any manual re-encoding of "build up a
+big array, then hand it to a native array/call operation" is a candidate
+for this same class. Fixed with a `pushAll` loop (`encoding.ts`) at
+both sites, plus the two smaller-scale identical-pattern call sites
+(`out.push(...strBytes)`, `records.push(...charBytes)`, both
+per-string/per-character and so not actually at risk at any realistic
+size, fixed anyway rather than leaving a second instance of a
+now-identified landmine pattern sitting in the same file). All 17
+existing `encoding.test.ts` tests, including the §3.1 60,000-deletions
+property test, pass unchanged.
+
+**The honest performance finding, not a bug: `Doc` fails S6 by roughly
+168x, and is measurably slower than `ArrayDoc` — the exhibit it succeeded
+specifically for being unusably slow — at every size from 10,000
+characters up.**
+
+```
+n=1000    NaiveDoc 2.5ms    ArrayDoc 12.6ms    RgaDoc 11.3ms    Doc 20.2ms   (build)
+n=10000   NaiveDoc 12.2ms   ArrayDoc 479.9ms   RgaDoc 46.5ms    Doc 1.66s    (build)
+n=100000  NaiveDoc 89.5ms   ArrayDoc 81.73s    RgaDoc 433.3ms   Doc 339.9s   (build)
+                                                RgaDoc 365.1ms   Doc 168.0s   (replay/cold-open)
+```
+
+(`NaiveDoc`'s speed is irrelevant to correctness — it diverges under
+concurrency, PRD §4 exhibit 1 — included only for scale.) Root cause:
+every `integrate()` call, insert or delete, calls `propagateSizesUp`,
+which walks from the changed node to the tree root to keep `size`/
+`liveSize` current. For a forward-typed document that walk is O(current
+depth) = O(current length), making a full n-character build (or,
+identically, a full cold-open replay of one) O(n²) — the same asymptotic
+shape that makes `ArrayDoc`'s O(n) splice-per-insert bad, except `Doc`
+pays a higher constant factor per step (tree-node traversal and field
+writes vs. `ArrayDoc`'s single native `memmove`-backed `splice`), so it
+loses even the case where the two are asymptotically tied. `RgaDoc`
+doesn't have this problem — DECISIONS #0017's treap gives it O(log n)
+split/merge instead of an O(depth) parent-chain walk, and that's the
+only exhibit the committed S6 gate (`rga-doc.test.ts`) actually measures.
+**The gate has always been honest about what it tests; it was never
+claimed to cover `Doc` itself, and this entry is the first time anyone
+checked.**
+
+**Also measured against Yjs (`yjs@13.6.31`, added as a root
+devDependency), per ARCH §9's explicit instruction to report losses:**
+
+```
+n=100000  Yjs build=130.6s  replay=4.6ms    wire=100,015 B (1.00 bytes/char)
+          Doc build=339.9s  replay=168.0s
+```
+
+Doc's cold-open is ~36,800x slower than Yjs's at 100k, and our wire
+format costs ~12.7 bytes/character against Yjs's ~1.0 (ARCH §3.1 only
+specifies run-length-encoding for *deletions*; consecutive same-replica
+*inserts* get no equivalent compression here, while Yjs's update format
+deltas them by construction — a real, narrower-than-Yjs scope, not a
+bug). One nuance, not a mitigating factor: Yjs's own naive
+one-char-at-a-time `insert` loop is *also* slow to build (130.6s,
+actually slower than `Doc`'s own build) — the difference is architectural,
+not "Yjs is fast at everything": Yjs pays a real cost once, on the
+writer, and every reader's cold-open stays cheap regardless of how the
+document was typed, because its size/index bookkeeping isn't
+recomputed by walking on every single reader's `integrate()` the way
+`Doc`'s currently is.
+
+**Deliberately not fixed here: `Doc`'s O(n²) forward-typing cost.**
+Giving `Doc` an O(log n) incremental size-maintenance structure (a
+treap-backed Fugue tree, matching what `RgaDoc` already has) is a
+genuine architectural change, not a benchmark-suite task, and DECISIONS
+#0017 already declined exactly this scope for `Doc` at Step 6 ("full
+treap-level efficiency ... explicitly scoped out"); ARCH §2.5 frames a
+treap-backed Fugue as aspirational future work in its own words. Step
+15's job, per ARCH §9, is to measure and report honestly — "including
+the ones that lose" — not to close every gap a measurement surfaces.
+Recorded here as a known, currently-real limitation rather than quietly
+worked around.
+
+**Three methodology bugs, caught by the measurements themselves, on the
+way to a trustworthy `bench/memory.mjs` — the most extended "predict,
+measure, get an impossible number, investigate" chain of this step.**
+
+First: building the 100,000-character test document by typing forward
+(this suite's default workload) pays the same O(n²) `propagateSizesUp`
+cost as the cold-open finding above, for no reason — a `FugueNode`'s
+memory footprint doesn't depend on tree depth. Fixed by inserting at
+uniformly random positions instead (a deterministic PRNG, `mulberry32`
+in `bench/lib.mjs`, not `Math.random()`, so the number stays reproducible
+run to run) — a bushy, shallow tree, under a second to build.
+
+Second: measuring "all live" and "all tombstoned" as two phases of one
+long-running process (build, measure; delete everything, measure again)
+produced a *negative* tombstone overhead — tombstoned heap usage measured
+smaller than live. Impossible: tombstones are never removed from the tree
+(`fugue-doc.ts`'s own comments on `deleteById` are explicit the node
+stays, just flagged, and each delete additionally retains its own
+`CrdtOp` in the doc's op log), so the true number can only go up.
+Re-measuring at 10% increments through the delete pass instead of only
+before/after resolved it: heap usage climbed monotonically and
+reproducibly across three separate runs (~57 → ~81 MiB) when
+`global.gc()` was interleaved *during* the deletes, every time — but
+collapsed to a nonsensical ~4 MiB whenever the deletes ran as one
+uninterrupted synchronous burst with `gc()` only called at the end.
+`deleteById`'s own churn apparently needs V8's incremental GC scheduled
+*during* a long synchronous mutation loop, not several `gc()` calls
+stacked afterward, to report a `heapUsed` worth trusting — not
+independently root-caused past that empirical finding.
+
+Third, a smaller version of the same trap: even with interleaving, one
+*more* `gc()`-and-measure call strictly after the last checkpoint
+reintroduced the same collapse. Fixed by reporting the final checkpoint's
+own reading as the "tombstoned" figure, rather than a fresh measurement
+taken afterward.
+
+**Numbers** (`bench/memory.mjs`, n=100,000, uniformly random insert
+positions):
+
+```
+all live:       58.15 MiB total, 609.7 bytes/char
+all tombstoned: 81.82 MiB total, 857.9 bytes/char
+tombstone overhead vs live: 248.2 bytes/char extra
+```
+
+~600-900x the wire format's ~1 byte/character (expected — an in-memory
+tree of JS objects, each carrying an id, a parent pointer, two
+sibling-bucket arrays, and size/liveSize counters, against a packed
+binary format with none of that structure). The ~248 bytes/character
+tombstone overhead is the permanently-retained delete `CrdtOp` (id +
+deps + payload) plus its integration bookkeeping, not a larger node —
+the price ARCH §2.4 already names for staying convergent: "deleted" has
+to be remembered forever, never actually reclaimed.
+
+**Design choices made without a specific doc citation, stated plainly:**
+`bench/` scripts are plain Node ESM (`.mjs`), not part of the vitest
+suite or CI — these are measurements to read, not assertions to pass or
+fail (the one genuinely-assertable figure, the §3.1 60,000-deletions
+byte budget, already has its own `encoding.test.ts` gate; the bench
+script just reprints it for one complete report). `bench/` was added to
+`pnpm-workspace.yaml`-adjacent resolution by making it depend on
+`starling-crdt` and `yjs` as *root* devDependencies (`pnpm add -D -w`)
+rather than giving `bench/` its own `package.json` — Node's ancestor-
+`node_modules` resolution then finds both from any script under
+`bench/` without a fourth workspace package existing solely to hold two
+dependency declarations. Every script that would take minutes at
+n=100,000 by default (`Doc`/`ArrayDoc` cold-open, the Yjs comparison)
+defaults to 1k/10k and requires an explicit `--full` flag for the
+100k case, or (for `Doc`@100k specifically, ~500s) isn't re-run live by
+the script at all — the already-measured, directly-obtained number is
+cited in `bench/README.md` instead, the same precedent DECISIONS #0014
+set for `ArrayDoc`@100k.
