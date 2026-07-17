@@ -60,7 +60,7 @@ export function checkRelayIgnorance(packageDir = DEFAULT_PACKAGE_DIR) {
 
   for (const file of listSourceFiles(path.join(packageDir, "src"))) {
     const text = readFileSync(file, "utf8");
-    // docs/DECISIONS.md #0007: blank comments (not strings — the import
+    // docs/DECISIONS.md #0008: blank comments (not strings — the import
     // specifier and any banned string this is meant to catch are both
     // string literals in real code) so a comment explaining why a concept
     // is *absent* doesn't trip the gate meant to catch its *presence*.
