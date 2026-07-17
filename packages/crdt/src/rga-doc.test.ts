@@ -29,6 +29,44 @@ describe("RgaDoc vs ArrayDoc: differential (same merge rule, different storage)"
   });
 });
 
+describe("RgaDoc's own bug (ARCH §2.3, exhibit 3): concurrent backward typing interleaves", () => {
+  it("two replicas each typing a word backward converge to an unreadable jumble, not a clean concatenation", () => {
+    // "Typing backward": each new character inserted at visible index 0,
+    // so the *last* character typed ends up leftmost. Concurrently on two
+    // replicas, unaware of each other.
+    const a = new RgaDoc("A");
+    const b = new RgaDoc("B");
+    const opsA = [..."hello"].map((ch) => a.insertLocal(0, ch));
+    const opsB = [..."world"].map((ch) => b.insertLocal(0, ch));
+
+    // Each replica alone reconstructs its own word, reversed (expected:
+    // inserting each new character before the last one written reverses
+    // the typed order — this is not the bug, just how index-0 insertion
+    // works, and it's identical for ArrayDoc/RgaDoc/Doc alike).
+    expect(a.text).toBe("olleh");
+    expect(b.text).toBe("dlrow");
+
+    const allOps = [...opsA, ...opsB];
+    const r1 = new RgaDoc("R1");
+    for (const op of allOps) r1.receive(op);
+    const r2 = new RgaDoc("R2");
+    for (const op of [...allOps].reverse()) r2.receive(op);
+
+    // It converges — both delivery orders agree...
+    expect(r1.text).toBe(r2.text);
+    // ...but on garbage: not "ollehdlrow", not "dlrowolleh", not any
+    // clean concatenation of the two per-replica results in either order.
+    // Convergence is not correctness (PRD §2.3): agreeing on a jumble is
+    // still agreeing.
+    expect(r1.text).not.toBe("olleh" + "dlrow");
+    expect(r1.text).not.toBe("dlrow" + "olleh");
+    // The actual result, pinned so this exhibit keeps demonstrating
+    // exactly this failure if anyone is ever tempted to "fix" it here —
+    // see rga-doc.ts's own comment: fixing this deletes the exhibit.
+    expect(r1.text).toBe("dollrloewh");
+  });
+});
+
 describe("RgaDoc cold-open performance (S6)", () => {
   it("100k-character document cold-opens in under 1s", () => {
     // Build the op log on one replica (sequential typing, the common

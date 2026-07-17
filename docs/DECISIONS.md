@@ -707,3 +707,69 @@ partition is ever wrong again. This assertion now runs inside the property
 test itself, across 500 generated scenarios, not as a one-off manual
 check — it's the mechanism that would have caught this bug immediately
 instead of via a downstream text mismatch two steps later.
+
+## 0017 — Fugue (`Doc`): scoped to the documented asymmetry, not the full academic algorithm; a bucket-ordering bug caught by the shared contract test, not the new one
+
+**Step:** 6
+
+Two things worth separating: what `Doc` deliberately does *not* attempt,
+and a real bug in what it does attempt.
+
+**Scope, stated honestly rather than overclaimed.** The published Fugue
+algorithm (Weidner & Kleppmann) is a general tree-CRDT with a precise rule
+(closer to YATA's "left-origin/right-origin" comparison) for resolving
+arbitrary interleaving patterns. Implementing that exactly from memory,
+under real risk of a subtly wrong recollection, was judged higher-risk
+than the alternative actually taken: derive, by hand, the specific
+mechanism that fixes *the documented case* — S5 is "no interleaving on
+concurrent backward typing," not "no interleaving under any conceivable
+concurrent edit pattern." The mechanism: `insertLocal` anchors forward
+typing to the *left* neighbor with side `R` (RGA's own convention,
+unchanged) but anchors "insert at visible index 0" to the *right* neighbor
+with side `L` instead of also using `R` — so repeated same-replica
+backward-typing chains through a *new* origin every keystroke (each
+character's origin is the previous character, which has no other left-
+child yet) rather than repeatedly competing at one shared anchor. Two
+replicas each backward-typing their own word therefore build two
+independent chains, rooted at two *different* top-level siblings, and
+`integrate()`'s tie-break is scoped to true `(origin, side)` siblings only
+— so the two chains never interleave with each other; only the two
+chains' *roots* (one tie-break, not one per character) decide which whole
+word comes first. Verified by hand for the 2-word and 3-word case before
+writing any code, then confirmed by running it (see `fugue-doc.ts`'s
+architecture comment and `rga-doc.test.ts`'s companion failing-to-be-
+readable proof). This is a real fix for the documented anomaly, not a
+claim to have reimplemented the full paper — a future step that needs the
+general case should treat this as a starting point, not a finished
+implementation.
+
+**The bug, caught by the *existing* shared contract test, not a new
+one.** `Doc`'s very first test run failed on `doc-contract.test-helpers.ts`'s
+`insertBefore` case — expected `"aBc"`, got `"Bac"`. Traced by hand:
+`insertIntoBucket` inserted every new (always highest-id) sibling at array
+index 0 in both the left and right buckets. For a *right* bucket, index 0
+is correct — in-order traversal is `[parent, R0, R1, ...]`, so array-first
+is parent-adjacent. For a *left* bucket, traversal is
+`[..., L1, L0, parent]` — array-*last* is parent-adjacent, the opposite
+end. Always inserting fresh siblings at index 0 therefore put every new
+left-child as far from its anchor as possible instead of closest, which
+had gone unnoticed until a bucket held more than one sibling — every
+insertion up to that point in testing had built one-element buckets
+(exactly the shape backward-typing produces, by design), so the ordering
+direction never mattered until `insertBefore` added a second sibling to an
+already-occupied bucket. **This is the same class of gap the origin-forest
+search and DECISIONS #0013 already surfaced twice: a rule that's correct
+for every case actually exercised so far can still be wrong, and the gap
+only shows up once a test exercises the specific shape that reveals it.**
+
+**Resolved:** `insertIntoBucket` takes the bucket's side and compares in
+the direction that keeps "highest id ends up closest to the anchor" true
+for *both* bucket kinds — descending for right buckets (unchanged),
+ascending for left buckets (the fix). `insertBefore` itself was also
+switched from anchoring as the tombstone's left-child to its right-child,
+for the same reason, once the corrected direction made either choice
+correct and right was the more natural reading of "insert next to this
+now-invisible anchor." Full suite re-run clean afterward: 153 tests,
+including 500 fresh property-test runs cross-checking `Doc` against a
+plain-array reference for single-replica sequences, and the two- and
+three-word interleaving-prevention proofs.
