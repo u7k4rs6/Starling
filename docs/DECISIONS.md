@@ -1263,3 +1263,74 @@ before committing.
 
 269 tests (11 new, all in `packages/editor/src/binding.test.ts`). Lint,
 typecheck, and both gates clean.
+
+## 0024 — Step 13: undo manager, S11; a genuine algorithmic finding surfaced by a wrong test prediction, correctly told apart from a bug
+
+Added two small `Doc` primitives undo needs and doesn't already have:
+`deleteById(id)` (delete a specific character regardless of its current
+visible index — `deleteLocal` only takes a visible index, and undo
+fundamentally operates on ids, same reasoning as `resolveAnchor` in
+DECISIONS #0022) and `charForId(id)` (read a — possibly tombstoned —
+character's value; undoing a delete needs to know what was deleted, and
+the tombstone, never actually removed from the tree, is the only place
+that value still lives). Refactored `binding.ts`'s `opsToSteps` to split
+out `opToStep` (pure: PM step for an *already-integrated* op) from the
+`doc.receive` + position-computation loop around it — undo's own ops are
+integrated the moment `deleteById`/`insertBefore` create them, so reusing
+`opsToSteps` (which calls `receive` again) would be wrong, not just
+redundant; `opToStep` alone is exactly the reusable half. Built
+`UndoManager` (`packages/editor`, per FRONTEND §1.4's placement) as a
+per-batch LIFO stack of `{kind: "insert", id}` / `{kind: "delete",
+tombstoneId, char}` entries, undone in reverse within a batch (last
+sub-edit first). No ProseMirror import in the file at all — undo
+operates purely on `Doc`, turning its output into PM steps is the
+caller's job via the newly-exported `opToStep`. No redo: not named
+anywhere in the four spec docs, so not built.
+
+**A wrong hand-derived test prediction that turned into a real, useful
+algorithmic finding — told apart from a bug by measuring before
+concluding, the same discipline as DECISIONS #0013/#0014/#0018/#0021/#0022/#0023.**
+The S11 test built replica A's "hello", had replica B (having already
+received it) insert "XXX" at visible index 3 (structurally anchored to
+the first 'l'), and predicted the merged text would render
+`"helXXXlo"` — X's appearing between the two 'l's, matching the origin.
+Measured `"helloXXX"` instead: X's rendered at the very *end*. Traced by
+direct measurement (a throwaway script, not further hand-tracing, after
+two wrong hand-traces already in one sitting) rather than guessing
+again: "hello" is a right-child chain (h→e→l₁→l₂→o); X's origin is l₁
+with side "R", landing in l₁'s right *bucket* — which already contains
+l₂ (with counter 3) as an existing sibling. Right buckets sort
+*descending* by id (`compareElemIds`: counter first, replica as
+tiebreak), and B's fresh id has counter 0 (B has made no local edit
+before this point, so its own counter starts at 0 regardless of how many
+ops it has *received*) — lower than l₂'s counter 3, so X sorts *after*
+l₂'s entire subtree (which includes 'o') in the bucket, not before it.
+This is correct, deterministic Fugue behavior, not a bug: verified by
+reproducing the *opposite* outcome (`"helXlo"`) in an isolated script
+where B built "hello" itself first, giving its own subsequent inserts
+higher counters than the existing chain — same code, different id
+history, different (still fully deterministic) rendered order. The
+general shape worth naming: **inserting "at visible index N" places a
+new character as an `(origin, side)` sibling, tie-broken by id against
+whatever else is already anchored to that same origin — it does not
+guarantee landing at index N in the final tree the moment anything else
+is already chained there with a higher-sorting id, even when that
+something else arrived first.** Fixed the test by asserting content via
+a code-point multiset (`codePointCounts`, added to this file) rather
+than the specific rendered string, since the test's actual claim (undo
+removes exactly the right characters regardless of where a
+structurally-nested remote insert renders) never depended on the exact
+visual position in the first place — the wrong assertion was in what was
+checked, not in a flawed test design.
+
+Mutation-tested the core "undo targets ids, not positions" claim:
+swapped `doc.deleteById(entry.id)` for `doc.deleteLocal(0)` (a position-
+based stand-in) and reran — 3 of 10 tests failed as expected (the LIFO
+test, the within-batch-reverse-order test, and the restore-property
+test), confirming they'd catch a regression to position-based undo.
+Reverted before committing.
+
+283 tests (14 new: 4 `Doc.deleteById`/`charForId` tests in
+`packages/crdt/src/fugue-doc.test.ts`, 10 in the new
+`packages/editor/src/undo.test.ts`). Lint, typecheck, and both gates
+clean.

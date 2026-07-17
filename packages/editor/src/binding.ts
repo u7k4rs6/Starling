@@ -56,16 +56,40 @@ export function transactionToOps(tr: Transaction, doc: Doc): CrdtOp[] {
 }
 
 /**
+ * The pure half of `opsToSteps`: given an op that is *already* integrated
+ * into `doc` (the caller integrated it, or it was always local), compute
+ * the ProseMirror step that reflects it. Split out from `opsToSteps` so
+ * the undo manager (Step 13) can reuse the exact same position math for
+ * ops it creates directly via `doc.deleteById`/`doc.insertBefore` — those
+ * are integrated the moment they're created (same as any local op,
+ * DECISIONS #0006), so calling `doc.receive` on them again would be
+ * wrong, not just redundant (idempotent, but the wrong shape of call to
+ * make from code that already knows the op is local).
+ */
+export function opToStep(op: CrdtOp, doc: Doc): Step {
+  if (op.payload.type === "insert") {
+    const visibleIndex = doc.resolveAnchor({ id: op.id, side: "before" });
+    const pos = visibleIndexToPmPos(visibleIndex);
+    const slice = new Slice(Fragment.from(schema.text(op.payload.char)), 0, 0);
+    return new ReplaceStep(pos, pos, slice);
+  }
+  const visibleIndex = doc.resolveAnchor({ id: op.payload.target, side: "before" });
+  const pos = visibleIndexToPmPos(visibleIndex);
+  return new ReplaceStep(pos, pos + 1, Slice.empty);
+}
+
+/**
  * FRONTEND §1.2: "opsToSteps(ops) — remote CRDT ops in, ProseMirror steps
  * out." Integrates each op into `doc` (`doc.receive`) immediately before
- * computing its position, one op at a time — not the whole batch up
- * front — because each step's position must be expressed relative to the
- * ProseMirror document *as it stands after the previous steps in this
- * same batch*, and `Doc.resolveAnchor` always reflects the *full* current
- * tree. Pre-integrating the whole batch would make an early op's position
- * already account for a later op's insertion, producing a position valid
- * against the *final* tree but wrong against the PM document the caller
- * is incrementally building up by applying these steps in order.
+ * computing its position via `opToStep`, one op at a time — not the whole
+ * batch up front — because each step's position must be expressed
+ * relative to the ProseMirror document *as it stands after the previous
+ * steps in this same batch*, and `Doc.resolveAnchor` always reflects the
+ * *full* current tree. Pre-integrating the whole batch would make an
+ * early op's position already account for a later op's insertion,
+ * producing a position valid against the *final* tree but wrong against
+ * the PM document the caller is incrementally building up by applying
+ * these steps in order.
  *
  * Precondition (not defended against here): ops must already be in
  * dependency-satisfying order, exactly as `Sequence.log`/`missingFrom`
@@ -80,16 +104,7 @@ export function opsToSteps(ops: CrdtOp[], doc: Doc): Step[] {
   const steps: Step[] = [];
   for (const op of ops) {
     doc.receive(op);
-    if (op.payload.type === "insert") {
-      const visibleIndex = doc.resolveAnchor({ id: op.id, side: "before" });
-      const pos = visibleIndexToPmPos(visibleIndex);
-      const slice = new Slice(Fragment.from(schema.text(op.payload.char)), 0, 0);
-      steps.push(new ReplaceStep(pos, pos, slice));
-    } else {
-      const visibleIndex = doc.resolveAnchor({ id: op.payload.target, side: "before" });
-      const pos = visibleIndexToPmPos(visibleIndex);
-      steps.push(new ReplaceStep(pos, pos + 1, Slice.empty));
-    }
+    steps.push(opToStep(op, doc));
   }
   return steps;
 }

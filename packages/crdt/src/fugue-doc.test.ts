@@ -237,6 +237,48 @@ describe("Doc: anchors (ARCH §7, S10) — a cursor is an ElemId + side, not a n
   });
 });
 
+describe("Doc: deleteById / charForId (ARCH §2.4/§8 — undo operates on ids, not positions)", () => {
+  it("deleteById removes a specific character regardless of its current visible index", () => {
+    const a = new Doc("A");
+    const ops = [..."abc"].map((ch) => a.insertLocal(a.text.length, ch));
+    const bId = ops[1]!.id; // 'b'
+
+    // A remote insert shifts 'b' away from wherever it "was" — deleteById
+    // must still find the same character by id, not by a stale index.
+    const b = new Doc("B");
+    for (const op of ops) b.receive(op);
+    const remoteOps = [..."XY"].map((ch, i) => b.insertLocal(i, ch));
+    for (const op of remoteOps) a.receive(op);
+    expect(a.text).toBe("XYabc");
+
+    a.deleteById(bId);
+    expect(a.text).toBe("XYac");
+  });
+
+  it("deleteById is idempotent-by-construction: deleting an already-tombstoned id doesn't throw or double-remove", () => {
+    const a = new Doc("A");
+    const op = a.insertLocal(0, "x");
+    a.deleteById(op.id);
+    expect(a.text).toBe("");
+    expect(() => a.deleteById(op.id)).not.toThrow();
+    expect(a.text).toBe("");
+  });
+
+  it("deleteById throws on an id this replica has never seen, same contract as insertBefore", () => {
+    const a = new Doc("A");
+    expect(() => a.deleteById({ replica: "ghost", counter: 0 })).toThrow();
+  });
+
+  it("charForId reads a character's value even after it's been tombstoned", () => {
+    const a = new Doc("A");
+    const op = a.insertLocal(0, "q");
+    expect(a.charForId(op.id)).toBe("q");
+    a.deleteById(op.id);
+    expect(a.text).toBe("");
+    expect(a.charForId(op.id)).toBe("q"); // the tombstone still remembers
+  });
+});
+
 function permutations<T>(arr: T[]): T[][] {
   if (arr.length <= 1) return [arr];
   const result: T[][] = [];

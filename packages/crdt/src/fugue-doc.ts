@@ -250,6 +250,29 @@ export class Doc extends Sequence<CrdtPayload> {
     return this.recordLocalOp({ type: "delete", target: node.id }, [node.id]);
   }
 
+  /** ARCH §8: undo of "insert x" is "delete the element with *this id*" —
+   * a specific id, not "whatever's at index N now" (§7's same reasoning
+   * that made `resolveAnchor` necessary applies here too: intervening
+   * remote edits can move the visible index this character sits at
+   * around freely). Idempotent the same way any delete is (ARCH §2.4):
+   * deleting an id that's already tombstoned (e.g., someone else deleted
+   * it concurrently with a pending local undo) still records a delete op
+   * rather than special-casing it away — "deleted" is already a monotone
+   * fact once true, so this is redundant, not wrong. */
+  deleteById(id: ElemId): CrdtOp {
+    this.nodeForId(id); // throws if unresolvable — same contract as insertBefore
+    return this.recordLocalOp({ type: "delete", target: id }, [id]);
+  }
+
+  /** The character a (possibly tombstoned) id was inserted with — needed
+   * by undo (ARCH §2.4): undoing a delete means inserting *a new*
+   * character with the same value next to the tombstone, and the
+   * tombstone itself (never actually removed from the tree) is the only
+   * place that original value still lives. */
+  charForId(id: ElemId): string {
+    return this.nodeForId(id).char;
+  }
+
   private liveLength(): number {
     return bucketLiveSize(this.rootChildren);
   }
