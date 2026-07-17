@@ -624,3 +624,86 @@ committed, by design: routinely paying 26.5s of CI time to reconfirm a
 trend that a single fast assertion already covers would be exactly the
 kind of unexplained cost §6 of the PRD warns against paying without
 knowing why.
+
+## 0015 — `Network`'s delivery order is a direct RNG index pick, not a sort over randomly-assigned priorities; ARCH §4's literal tiebreak rule doesn't apply, by construction
+
+**Step:** 5
+
+ARCH §4 describes the delivery queue as delivering messages "in an order
+the RNG chooses," and warns: "tiebreak on sequence number, not on
+insertion order into the queue, or the simulator is itself nondeterministic
+and you will spend a day finding out." That warning is specific to one
+implementation shape: assign each pending message a random priority (or
+sort key) and deliver in priority order — which needs an explicit tiebreak
+rule for the case where two messages draw the same priority, since relying
+on whatever order they happen to sit in when the sort is unstable (or
+relying on "insertion order" as an implicit tiebreak, which can silently
+mean different things depending on the underlying collection) is exactly
+the nondeterminism trap.
+
+`packages/sim/src/network.ts`'s `deliverOne()` doesn't do that. It builds
+the list of currently-*deliverable* pending indices (partition-filtered)
+and picks one directly via `rng.nextInt(deliverableIndices.length)` — a
+single RNG draw per delivery, not a comparison between two random keys.
+There is no tie to break, because nothing is ever compared to anything
+else; the "randomness" is in which index gets chosen, not in a value
+attached to each envelope. This still satisfies the actual requirement the
+tiebreak rule protects — delivery order is a pure, reproducible function of
+the seed, never of incidental array/Map iteration order — for a different
+and simpler reason: `pending` and `partitionOf` are only ever mutated by
+`send`/`deliverOne`/`dropOne`/`duplicateOne`/`partition`/`healPartitions`,
+in the order the test calls them, so "the current deliverable set" is
+itself deterministic before the RNG ever gets involved.
+
+**Resolved:** no code change — this is a design note explaining why
+`network.ts` doesn't contain an explicit tiebreak comparator, so a future
+reader doesn't go looking for one and conclude ARCH §4's requirement was
+missed. If `Network` is ever rewritten to assign priorities up front
+(e.g. to support peeking at delivery order before consuming it), the
+literal tiebreak rule would become load-bearing again at that point, not
+before.
+
+## 0016 — S4 property test: `partition()` used replica names that never matched `send()`'s names, silently no-op'ing the partition; caught by a failing property test, not by inspection
+
+**Step:** 5
+
+`convergence.test.ts`'s S4 property test (many random op sequences, 2
+replicas, partition/heal) failed on its first run:
+
+```
+Counterexample: [[{"char":" ",...}],[{"char":"!",...}],0]
+Got AssertionError: expected ' ' to be '!'
+```
+
+Traced, not just patched: the test constructed
+`new RgaDoc("A")`/`new RgaDoc("B")` and called
+`net.partition([["A"], ["B"]])`, but every `net.send(...)` call in the same
+test used `replicaName(replicaIndex)` — `"replica-0"` / `"replica-1"` —
+never `"A"`/`"B"`. `Network.canDeliver` looks up `partitionOf.get(from)`
+and `partitionOf.get(to)`; since neither `"replica-0"` nor `"replica-1"`
+was ever a key in that map, both defaulted to group 0 and every message
+was, in fact, fully deliverable the entire time — the partition never
+applied. The test then called `net.deliverAll(() => {})` immediately
+after, intending "nothing is deliverable yet, so this drains 0" — but
+since everything actually *was* deliverable, `deliverAll` popped every
+envelope off the queue and handed each to the no-op callback, silently
+discarding all of them. By the time `healPartitions()` and the real
+`deliverAll` ran, the queue was already empty, so neither replica ever
+received the other's op — hence `" "` vs `"!"`, each replica showing only
+its own local edit.
+
+**Two separate mistakes, not one:** the naming mismatch (root cause), and
+the `deliverAll(() => {})` pattern that made the mismatch's symptom
+*invisible* instead of loud — a no-op callback can't distinguish "nothing
+was deliverable" from "something was deliverable and I threw it away."
+
+**Resolved:** replica construction, `partition()`, and every `send()` in
+the property test now all go through the same `replicaName(i)` helper, so
+there is one name per replica, used consistently. The
+`deliverAll(() => {})` call was replaced with
+`expect(net.deliverOne()).toBeNull()` — an assertion that nothing is
+deliverable, which fails loudly (rather than silently discarding) if the
+partition is ever wrong again. This assertion now runs inside the property
+test itself, across 500 generated scenarios, not as a one-off manual
+check — it's the mechanism that would have caught this bug immediately
+instead of via a downstream text mismatch two steps later.
