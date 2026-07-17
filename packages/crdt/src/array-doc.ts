@@ -1,33 +1,36 @@
 import { compareElemIds, type ElemId, type ReplicaId } from "./elem-id.js";
 import { Sequence, type Op } from "./sequence.js";
 
-export type InsertPayload = { l: ElemId | null; char: string };
-export type InsertOp = Op<InsertPayload>;
+export type InsertPayload = { type: "insert"; l: ElemId | null; char: string };
+export type DeletePayload = { type: "delete"; target: ElemId };
+export type CrdtPayload = InsertPayload | DeletePayload;
+export type CrdtOp = Op<CrdtPayload>;
 
-type Elem = { id: ElemId; char: string };
+type Elem = { id: ElemId; char: string; deleted: boolean };
 
 /**
  * Museum exhibit 2 (PRD §4). Correct RGA merge, array-backed storage.
- * `integrate()` is exactly ARCH §2.3's four lines, unmodified: insert after
- * the origin, then skip forward past concurrent elements with
- * higher-precedence ids. It converges (proven below by fast-check, S1/S2)
- * — the exhaustive origin-forest search (`research/origin-forest-search.mjs`,
- * DECISIONS #0012) is what says this had to be true before this class was
- * even written.
+ * `integrate()` is exactly ARCH §2.3's four lines for the insert case,
+ * unmodified: insert after the origin, then skip forward past concurrent
+ * elements with higher-precedence ids. That skip compares against the
+ * *internal* array, tombstones included — a deleted element still occupies
+ * a structural position and is still a valid concurrent-sibling reference,
+ * per ARCH §2.4. It is also unusable at scale (linear `indexOfId`); see
+ * naive-doc.ts's sibling comment in array-doc history for why that stays.
  *
- * It is also unusable at scale. `indexOfId` is a linear scan and `integrate`
- * calls it on every insert, so cold-open is O(n) per character, O(n²) for
- * the whole document. That is deliberate — this exhibit gets replaced by
- * the order-statistic treap at Step 4b (ARCH §2.5), and the benchmark
- * proving why (~41s extrapolated at 100k characters) is Step 15's, not
- * this one's. Do not "fix" the linear scan here; that deletes the exhibit.
+ * Deletion (ARCH §2.4, Step 4): a deleted element is tombstoned, never
+ * removed — its `ElemId` must stay resolvable forever, because a
+ * concurrent op may still reference it as an origin, and `insertBefore`
+ * (below) may still need to find it. `del` is idempotent and commutative
+ * for free: marking `deleted = true` twice has the same effect as once,
+ * because "deleted" is a monotone fact, not a value to reconcile.
  *
- * It also interleaves on concurrent backward typing (ARCH §2.3) — that
- * anomaly isn't demonstrated until Step 6 preserves `RgaDoc` as exhibit 3
- * once Fugue replaces it; `ArrayDoc` and `RgaDoc` share this same merge
- * rule and only diverge in storage, per PRD §4's exhibit list.
+ * Revive is not a thing. The inverse of deleting an element is not
+ * reviving its id — it's `insertBefore(tombstoneId, char)`, a brand new
+ * element with a brand new id, placed next to where the tombstone still
+ * sits. Position is restored; identity is not.
  */
-export class ArrayDoc extends Sequence<InsertPayload> {
+export class ArrayDoc extends Sequence<CrdtPayload> {
   private readonly elems: Elem[] = [];
 
   constructor(replica: ReplicaId) {
@@ -35,27 +38,76 @@ export class ArrayDoc extends Sequence<InsertPayload> {
   }
 
   get text(): string {
-    return this.elems.map((e) => e.char).join("");
+    return this.elems
+      .filter((e) => !e.deleted)
+      .map((e) => e.char)
+      .join("");
   }
 
-  insertLocal(index: number, char: string): InsertOp {
-    const l = index === 0 ? null : this.elems[index - 1]!.id;
-    return this.recordLocalOp({ l, char }, l === null ? [] : [l]);
+  /** Visible index → the internal id of the live element immediately
+   * before it, or null for "insert at the very start." O(n): this is the
+   * exact mapping ARCH §2.5's treap makes O(log n) via a live-subtree
+   * count, at Step 4b, not here. */
+  private originForVisibleIndex(visibleIndex: number): ElemId | null {
+    if (visibleIndex === 0) return null;
+    let seen = 0;
+    for (const e of this.elems) {
+      if (e.deleted) continue;
+      seen += 1;
+      if (seen === visibleIndex) return e.id;
+    }
+    throw new RangeError(`visible index ${visibleIndex} out of range`);
+  }
+
+  insertLocal(visibleIndex: number, char: string): CrdtOp {
+    const l = this.originForVisibleIndex(visibleIndex);
+    return this.recordLocalOp({ type: "insert", l, char }, l === null ? [] : [l]);
+  }
+
+  /** ARCH §2.4: the inverse of del(id) is insertBefore(tombstoneId, char),
+   * not a revive. Origin is the tombstone's own internal predecessor, so
+   * the new element lands in the same neighborhood the tombstone still
+   * marks. (Guaranteed convergent, not guaranteed to land strictly to the
+   * tombstone's left under concurrent inserts nearby — that precision is
+   * Fugue's job, Step 6, not this exhibit's.) */
+  insertBefore(tombstoneId: ElemId, char: string): CrdtOp {
+    const idx = this.indexOfId(tombstoneId);
+    if (idx === -1) throw new RangeError("insertBefore: tombstone id not found");
+    const l = idx === 0 ? null : this.elems[idx - 1]!.id;
+    return this.recordLocalOp({ type: "insert", l, char }, l === null ? [] : [l]);
+  }
+
+  deleteLocal(visibleIndex: number): CrdtOp {
+    let seen = 0;
+    for (const e of this.elems) {
+      if (e.deleted) continue;
+      if (seen === visibleIndex) {
+        return this.recordLocalOp({ type: "delete", target: e.id }, [e.id]);
+      }
+      seen += 1;
+    }
+    throw new RangeError(`visible index ${visibleIndex} out of range`);
   }
 
   private indexOfId(id: ElemId): number {
     return this.elems.findIndex((e) => e.id.replica === id.replica && e.id.counter === id.counter);
   }
 
-  protected integrate(op: InsertOp): void {
+  protected integrate(op: CrdtOp): void {
+    if (op.payload.type === "delete") {
+      // op.payload.target is guaranteed already integrated: deps: [target]
+      // (DECISIONS #0010) buffers this op until it is.
+      const idx = this.indexOfId(op.payload.target);
+      this.elems[idx]!.deleted = true;
+      return;
+    }
+
     const { l, char } = op.payload;
-    // l, if not null, is guaranteed already integrated: Sequence buffers
-    // this op (deps: [l]) until it is (DECISIONS #0010), so indexOfId
-    // below never returns -1.
+    // l, if not null, is guaranteed already integrated for the same reason.
     let at = l === null ? 0 : this.indexOfId(l) + 1;
     while (at < this.elems.length && compareElemIds(this.elems[at]!.id, op.id) > 0) {
       at += 1;
     }
-    this.elems.splice(at, 0, { id: op.id, char });
+    this.elems.splice(at, 0, { id: op.id, char, deleted: false });
   }
 }

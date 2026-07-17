@@ -519,3 +519,55 @@ anything else load-bearing.
 Per instruction: no merge rule, `ArrayDoc`, or fast-check property tests
 were written this session. This is prerequisite verification for Step 3,
 not Step 3 itself.
+
+## 0013 — Wrong prediction, caught by a failing test: a same-replica-known element can still end up positioned after a freshly-inserted one, because cross-replica counters aren't a recency signal
+
+**Step:** 4
+
+Writing an example test for concurrent delete + insert (ARCH §2.4's
+warning about a concurrent op referencing a tombstone as origin), the
+first draft predicted: replica C, having already synced "abc," inserts
+"X" at visible index 2 (intending "between b and c") and ends up with
+"abXc." Running it produced `"abcX"` instead — X landed *after* c, not
+before it. Traced by hand and confirmed by direct execution (not just
+patched to make the test pass): X's origin is "b," the same origin "c"
+has, making them RGA siblings; the merge rule's tie-break among siblings
+is purely `compareElemIds` on id, which compares `counter` first — c's id
+is `{replica: "setup", counter: 2}`, X's is `{replica: "C", counter: 0}`,
+and `2 > 0`, so c wins the tie-break and stays to X's left, even though
+replica C had already synced c and *intended* X to land before it.
+
+This is not a bug — it is `docs/DECISIONS.md` #0012's own finding
+(convergence holds under any total order, causal monotonicity or not)
+showing up as a felt surprise instead of an abstract search result. A
+replica's counter always starts at 0 and only ever increases *relative to
+that replica's own prior ops*; it says nothing about how much of the
+document that replica has already read. A replica's first local op can
+therefore have a numerically low id even after fully syncing a long
+document, and lose tie-breaks against far older content from other
+replicas. Same-replica typing never exposes this (a replica's own counter
+is always the newest among its own ops), which is exactly why it took a
+deliberately cross-replica scenario to surface it.
+
+**Generalization:** origin-based placement (RGA's `l` field) only records
+*what came before*, never a right boundary. Two elements sharing an origin
+are placed relative to each other by naked id comparison, with no
+sensitivity to which one the "current" replica already knew about. This is
+the same root cause as ARCH §2.3's documented backward-typing interleaving
+anomaly (Step 6, Fugue) — a different symptom of the identical mechanism:
+*origin says where you came from, not where you should end up relative to
+everything already there.* Worth remembering when Step 6 explains why
+Fugue tracks insertion side per element instead of just an origin pointer.
+
+**Separately, a plain test-authoring bug found in the same pass, not
+elevated to a "finding":** the delete-commutativity test's `opZ` (the
+insert of `"z"`) was created but never captured into a variable, so it was
+never delivered to either receiving replica — the assertion failed with an
+empty string, which briefly looked like a second algorithmic surprise
+before being traced to a missing variable capture. Fixed by capturing and
+including it. Distinguishing this from the finding above is the point:
+one was "the code did something I didn't predict, and the code was
+right"; the other was "the test forgot to send an op." Different failure,
+different fix, and conflating them would have meant either debugging the
+merge rule for a bug that wasn't there, or writing off a real finding as
+"probably just a test bug."
