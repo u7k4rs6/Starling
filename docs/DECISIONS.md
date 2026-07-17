@@ -1824,3 +1824,77 @@ any URL right now. No relay is running anywhere but this container's
 own throwaway test invocation. The PRD's own acceptance line for this
 step, "Public URL works," is not satisfied, and won't be until a human
 completes `docs/DEPLOY.md`'s three one-time steps.
+
+## 0028 — Step 17: README, docs, and `starling-crdt` v0.1.0 prepared for publish — dry-run passes, the real `npm publish` hits the same class of blocker Step 16 did
+
+**Step:** 17
+
+Checked before writing anything: `npm whoami` inside this container
+returns `ENEEDAUTH` — no npm account, no `NPM_TOKEN`, no credential of
+any kind for the npm registry exists here, the same structural gap
+DECISIONS #0027 already hit for hosting. S12's own PRD wording anticipates
+exactly this split — "Publish dry-run, then real publish at v0.1.0" are
+two separate clauses — so this entry does the half that's actually
+achievable inside this environment, verifies it directly rather than by
+inspection, and is explicit about the half that isn't.
+
+**`packages/crdt` is publish-ready.** `"private": true` removed,
+version bumped `0.0.0` → `0.1.0`, `description`/`license`/`repository`/
+`homepage`/`keywords`/`engines` added, `"files": ["dist"]` kept exactly
+as SECURITY §3 specifies ("ship build output only"). A package-level
+`packages/crdt/README.md` written (SECURITY §3's Cotangent precedent:
+"v0.1.0 shipped with a blank package page because the readme field was
+missing... check the rendered page on a dry-run before tagging") — its
+usage examples were not just written, they were run:
+`insertLocal`/`receive`/`text`/`anchorAt`/`resolveAnchor` against the
+actual built `dist/`, and separately `encodeOps`/`decodeOps`/
+`missingFrom` (the first attempt at verifying the encode/decode round-
+trip used `JSON.stringify` equality and reported a false failure — key
+ordering differs between the literal op object and the object
+`decodeOps` reconstructs, not a real mismatch; `assert.deepStrictEqual`
+confirmed the round-trip is correct, a small instance of the same
+"verify the verification method, not just the claim" discipline the
+rest of this log applies to real bugs). `LICENSE` (MIT — no license was
+specified anywhere in the four spec docs; chosen as the ecosystem-normal
+default for a small library, same category as Yjs's own, and stated
+here rather than left as an unexplained file) added at both repo root
+and inside `packages/crdt/` — npm only auto-includes a package's own
+`LICENSE`/`README` from *its own directory* at publish time, not a
+monorepo root one, so a root-only copy would have shipped a tarball
+missing it despite `git`'s own root `LICENSE` looking sufficient at a
+glance.
+
+**Verified with `npm publish --dry-run`** (works without any npm login —
+only the real `publish` needs auth): 43 files, 32.9 kB packed / 121.1 kB
+unpacked, contents exactly `dist/*`, `LICENSE`, `README.md`,
+`package.json` — no test files, no source-map-to-nowhere issue, nothing
+from `bench/` or `research/`. This is the artifact S12 actually measures
+("`npm install starling-crdt` gives a working CRDT") short of the
+registry round-trip itself.
+
+**`.github/workflows/publish-crdt.yml`** added: triggered by a
+`crdt-v*` tag push (not every push to `main` — a publish is effectively
+irreversible, a different risk category than a Pages redeploy), runs
+`packages/crdt`'s own tests plus the core-isolation gate, dry-runs again
+(fails the job before anything irreversible if the file list ever looks
+wrong), then `npm publish --provenance --access public` using an
+`NPM_TOKEN` secret that does not exist in this repository as committed —
+SECURITY §3's own recommendation ("Use npm's provenance flag... given
+Tessera it would be strange not to"), ready to run the moment a human
+adds that one secret.
+
+**Top-level `README.md`** written: what the project is, the package
+table, a quickstart, and — deliberately, matching how `bench/README.md`
+already reports S6 — an honest S1-S12 status table rather than a blanket
+"done." Two rows carry a ⚠️, not a ✅: S6 (`Doc` fails cold-open by
+~168x, `RgaDoc` passes; DECISIONS #0026) and S12 itself (dry-run passes,
+real publish blocked; this entry). Every other criterion is a real ✅,
+independently re-checked against the actual committed tests/gates before
+being written down, not carried over from memory of having built them
+weeks of conversation ago.
+
+**Not claimed:** `starling-crdt` is not live on the npm registry.
+`npm install starling-crdt` has not been run against a real published
+package by this session — there is no real published package to install
+yet. `docs/DEPLOY.md` §5 is the runbook for whoever has npm publish
+rights to finish this in two commands.

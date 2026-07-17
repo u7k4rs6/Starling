@@ -1,0 +1,61 @@
+name: Publish starling-crdt
+
+# Step 17 / S12. SECURITY §3: publish with provenance (a signed
+# attestation linking the published tarball to the exact commit and
+# workflow run that built it — npm's `--provenance` flag, free, needs an
+# OIDC-capable CI job and nothing else). Triggered by pushing a
+# `crdt-v*` tag, not on every push to main — a publish is irreversible
+# (npm allows unpublishing only within a short window, and even that is
+# discouraged) in a way a Pages redeploy isn't, so it stays a deliberate,
+# explicit action, never a side effect of unrelated work landing.
+#
+# Requires an NPM_TOKEN repository secret (an npm automation token with
+# publish rights on `starling-crdt`) that does not exist in this
+# repository as committed — see docs/DEPLOY.md. `npm publish --dry-run`
+# (no token needed) is run on every push to main via CI-adjacent checks
+# so the file list and package metadata stay verified continuously; only
+# the real publish needs the token, and only fires on a version tag.
+on:
+  push:
+    tags:
+      - "crdt-v*"
+
+permissions:
+  contents: read
+  id-token: write # required for --provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: npx tsc -b --pretty
+
+      - name: Test (crdt package only — the package being shipped)
+        run: npx vitest run packages/crdt
+
+      - name: Gate — core isolation
+        run: pnpm run gate:core-isolation
+
+      - name: Dry-run (fails the job if the file list looks wrong, before anything irreversible happens)
+        working-directory: packages/crdt
+        run: npm publish --dry-run
+
+      - name: Publish
+        working-directory: packages/crdt
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

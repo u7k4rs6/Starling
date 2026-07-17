@@ -1,7 +1,7 @@
 {
   "name": "starling-crdt",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "A from-scratch Fugue/RGA CRDT for collaborative plain text: no runtime dependencies, a compact binary wire format, tombstone-based deletion, and id-based anchors for cursors that survive concurrent edits.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,5 +14,25 @@
   "files": [
     "dist"
   ],
+  "sideEffects": false,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/u7k4rs6/Starling.git",
+    "directory": "packages/crdt"
+  },
+  "homepage": "https://github.com/u7k4rs6/Starling/tree/main/packages/crdt",
+  "keywords": [
+    "crdt",
+    "fugue",
+    "rga",
+    "collaborative-editing",
+    "real-time-collaboration",
+    "text-editing",
+    "operational-transform"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {}
 }
