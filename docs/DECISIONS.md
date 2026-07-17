@@ -1737,3 +1737,90 @@ defaults to 1k/10k and requires an explicit `--full` flag for the
 the script at all — the already-measured, directly-obtained number is
 cited in `bench/README.md` instead, the same precedent DECISIONS #0014
 set for `ArrayDoc`@100k.
+
+## 0027 — Step 16: deploy is prepared but not completed — no hosting credentials or repo-admin access exist in this environment, and neither can be conjured by "keep going"
+
+**Step:** 16
+
+PRD's acceptance criterion for this step is blunt: "Public URL works."
+That did not happen. What follows is the honest account of what was
+built, and — more importantly, matching this project's whole ethos of
+reporting losses rather than papering over them (ARCH §9, DECISIONS
+#0026) — exactly what wasn't, and why.
+
+**What actually blocks a public URL here, checked before concluding
+anything:** this session has git push access to the repository and,
+intermittently, GitHub API tools (`mcp__github__*`) for issues/PRs/
+files/branches — but no tool exposed by that server can flip a
+repository's Settings → Pages → Source toggle (checked the full tool
+list; the closest are file/branch/PR operations, none of them a
+repository-settings write), and no environment variable, config file, or
+credential for any hosting provider (Vercel, Cloudflare, Fly.io, Render,
+Railway, or otherwise) exists anywhere in this container (checked: no
+matching env vars, no `*.toml`/`vercel.json`/`netlify.toml` in the repo).
+Both gaps are structural, not something to reason past — a repo-settings
+toggle needs admin-level API access this session's GitHub tools don't
+expose, and a relay needs an actual paid-or-free hosting *account*,
+which by definition doesn't exist until a human creates one. Asked the
+user directly how to proceed (host it myself given credentials, prep
+config and let the user deploy, or skip live deploy and document the
+gap) — the question was declined and met with the same standing
+instruction that has carried this entire build: keep going
+autonomously. Reconciling that instruction with a hole no amount of
+"keep going" can close without external input: build everything that
+*is* achievable inside this environment, all the way to the last step
+that requires a credential or a click only a human can make, and
+document that boundary as precisely as the rest of this log documents
+everything else — not silently, and not by claiming a URL exists that
+doesn't.
+
+**What was built, all the way to that boundary:**
+
+- `packages/relay/scripts/serve.mjs` — the production entrypoint
+  `packages/demo/scripts/dev-relay.mjs` (Step 14) was always a
+  local-dev-only stand-in for (its own comment already said so:
+  "Step 16 ... is where a real hosted relay replaces this default").
+  Binds `0.0.0.0` (every interface, not just loopback), requires
+  `RELAY_ALLOWED_ORIGIN` explicitly (refuses to start without it —
+  a production relay silently defaulting to `localhost` would defeat
+  SECURITY §2.3's CORS check for the one case, an actual public
+  deployment, where getting it wrong matters most), and closes
+  cleanly on `SIGTERM`/`SIGINT` (most container platforms expect
+  that, not a hard kill, on redeploy/scale-down). Verified it actually
+  boots and routes a request end-to-end (`curl` against a locally-run
+  instance), not just that it typechecks.
+- `packages/relay/Dockerfile` — unusually small because
+  `packages/relay/package.json`'s own `"dependencies"` is `{}` (the
+  "relay ignorance" boundary, DECISIONS #0019, means it never imports
+  anything, npm or otherwise, beyond `node:http`): a build stage that
+  runs `tsc`, then a final stage that copies only `dist/`, `scripts/`,
+  and `package.json` — no `node_modules` in the shipped image at all.
+  Portable to any container host (Fly.io, Render, Railway, a bare VM
+  with Docker).
+- `.github/workflows/deploy-demo.yml` — builds `packages/demo` as a
+  static site and publishes it to GitHub Pages via the official
+  `actions/{configure-pages,upload-pages-artifact,deploy-pages}`
+  actions. `workflow_dispatch` only, deliberately not on every push to
+  `main` — a demo redeploy is a visible action against a URL a real
+  person might currently be using, not something that should happen as
+  a side effect of unrelated work landing on the default branch.
+- `packages/demo/vite.config.ts` — `base: "/Starling/"` under a new
+  `GITHUB_PAGES=true` env flag the workflow sets (a GitHub Pages
+  *project* site is served from `/<repo>/`, not the domain root; local
+  `vite`/`vite build` — dev, e2e — are unaffected, still root-based).
+  Verified by actually running `GITHUB_PAGES=true vite build` and
+  checking the emitted `index.html` references `/Starling/assets/...`,
+  not a hand-read of the config.
+- `docs/DEPLOY.md` — the concrete runbook for the two manual steps
+  above (enable Pages source; host the relay, set
+  `RELAY_ALLOWED_ORIGIN` there and `VITE_RELAY_URL` as a repo Actions
+  variable) plus the deploy trigger itself, written so whoever *does*
+  have the access this session doesn't can finish Step 16 in minutes,
+  not by re-deriving any of the above from scratch.
+
+**Not claimed:** S12 does not pass (that's Step 17's criterion, `npm
+install starling-crdt` — unaffected by any of this). No demo is live at
+any URL right now. No relay is running anywhere but this container's
+own throwaway test invocation. The PRD's own acceptance line for this
+step, "Public URL works," is not satisfied, and won't be until a human
+completes `docs/DEPLOY.md`'s three one-time steps.
