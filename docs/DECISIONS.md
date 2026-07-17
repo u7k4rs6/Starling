@@ -894,3 +894,109 @@ gate rather than guessing, since "the gate looked lenient" and "the gate
 is lenient" are not the same claim. Reverted the file; `git status`
 afterward showed only the intended two-line `index.ts` diff plus the new
 relay files, nothing left from the probe.
+
+## 0020 — Step 9: `packages/provider`, local persistence + reconnect + sync loop; S9 demonstrated with in-process doubles, a real crdt-package gap found by predicting the relay's actual data model before writing the pull path
+
+Built `Provider` (owns a `Doc`, a `Persistence`, a `RelayTransport`; no
+offline queue, exactly ARCH §6's `doc.missingFrom(lastPushedVector)`),
+`InMemoryPersistence` and `IndexedDbPersistence` (real IndexedDB, tested
+against `fake-indexeddb` rather than mocked away — a real implementation
+under test, the same principle as Step 8 testing `LogStore` against a
+real disk directory instead of a stubbed filesystem), and
+`HttpRelayTransport` (`fetch` against the exact §5 contract). Per the
+ladder's own split — Step 9's gate is "S9 passes," Step 10's is "S9
+demonstrable" — S9 ("offline edits survive reload and reconcile on
+reconnect") is already proven at this step, with the provider's own
+in-memory doubles (`InMemoryPersistence`, a `FakeRelay` shared-byte-log
+stand-in built in `provider.test.ts`); Step 10 is where a real relay and
+a real browser storage layer run together end to end, not where S9 first
+becomes true.
+
+**A real gap in the crdt package, found by predicting the data shape
+before writing code, not by hitting a bug afterward.** Before writing
+`Provider.sync()`'s pull half, worked out on paper what a `GET
+/doc/:id?from=N` response actually contains once more than one client has
+pushed to the same doc: ARCH §5 says the relay "appends bytes and hands
+back bytes from an offset" with no framing of its own, so that response
+is the raw concatenation of however many separate `POST` bodies (each one
+its own `encodeOps` blob) landed since offset N — not one blob.
+`decodeOps` as it stood decoded exactly one blob and silently stopped,
+dropping everything appended after it, because its own `recordCount`
+loop has no reason to know a second blob follows. Predicted this would be
+a real problem before it manifested as a failing test, not after — and
+fixed it at the source rather than routing around it in the provider:
+refactored `decodeOps` onto a position-aware primitive
+(`decodeOpsFrom(bytes, pos)`, unexported) and added `decodeOpsStream`,
+which loops that primitive until the buffer is exhausted. Predicted the
+loop would "just work" with no edge cases, since every blob is
+self-delimiting by construction (its own replica table + record count
+say exactly how many bytes it occupies) — verified via a 500-run
+fast-check property test concatenating up to 6 independently-encoded
+op batches and confirming `decodeOpsStream` recovers the flat
+concatenation exactly, plus the empty-buffer case (a doc nobody has ever
+pushed to). Prediction held on the first run, no surprise. This is a
+crdt-package (wire-format) addition, not a provider-local workaround —
+correctly scoped, since "what does concatenating two blobs decode to" is
+a property of the format itself, and any future consumer reading a
+growing append-only byte log needs the same answer. Both gates re-run
+clean; the addition introduces no ambient time/randomness/DOM reference,
+so gate 1 was never at risk.
+
+**Persistence stores a fresh full-log re-encode, not raw historical relay
+bytes — sidesteps the concatenated-blob problem entirely for the reload
+path.** `doc.missingFrom(new Map())` (an empty vector covers nothing, so
+"missing from it" is the entire integrated log) gives the complete op set
+on demand; `persistNow()` calls `encodeOps` on that fresh each save. This
+is always a single self-contained blob, decoded with plain `decodeOps`
+on reload — `decodeOpsStream` is needed only for `RelayTransport.read`'s
+output, which genuinely does span multiple pushes over time. Keeping the
+two paths on the right primitive (single-blob for "the whole doc, encoded
+once," stream for "raw bytes off an append-only wire") avoids reaching for
+the more general tool where the narrower one already fits.
+
+**`lastPushedVector` must be updated for pulled ops too, not just pushed
+ones — checked by mutation, not left to trust.** The sync loop pulls
+before it pushes (ARCH §6's own ordering: "reconnect, ask the relay for
+its cursor, compute the delta, push"). If ops received during the pull
+weren't also folded into `lastPushedVector`, the very next call to
+`doc.missingFrom(lastPushedVector)` would still count them as "ours to
+push," and the replica would immediately re-encode and re-append content
+it just downloaded — silently, since `Sequence.receive` is idempotent so
+nothing would look wrong locally, only the relay log would grow without
+bound. Wrote a test asserting the relay log's byte length is unchanged
+after a second replica pulls once and then syncs again with nothing new
+of its own. Before trusting the green run, mutation-tested it: deleted
+the pulled-ops-into-`lastPushedVector` update, reran — the "does not
+re-push" test failed exactly as predicted (extra bytes appended), along
+with, separately, both S9 reload tests failing under an independent
+mutation (a persistence save that dropped the op log to empty) — restored
+the real code afterward and confirmed a clean rerun. Both mutations were
+reverted before committing; neither survives in the shipped code.
+
+**TypeScript 5.7+'s generic `Uint8Array<ArrayBufferLike>` doesn't
+structurally satisfy lib.dom.d.ts's `BodyInit`, checked against this
+repo's actual toolchain (TS 5.9.3) rather than assumed from general
+awareness of the issue.** `fetch(url, { method: "POST", body: bytes })`
+failed to typecheck (`TS2769`) once `HttpRelayTransport` was written
+against a real `Uint8Array`. Verified this wasn't a design mistake on my
+part — a plain `Uint8Array` genuinely is a valid runtime fetch body —
+before reaching for a cast; fixed narrowly at the one call site
+(`bytes as BodyInit`) with a comment naming the mismatch, rather than
+loosening a type more broadly to make the error disappear.
+
+**`provider`'s own tsconfig adds `"lib": ["DOM"]`, scoped to that package
+only.** Needed for `indexedDB` and `fetch`'s DOM-flavored types (already
+available via `@types/node` without DOM, as relay's tests already showed,
+but `IDBDatabase`/`IDBOpenDBRequest` etc. are DOM-only). Checked, not
+assumed, that this doesn't collide with `@types/node`'s own overlapping
+declarations (`fetch`, `Response`, ...) before writing real code against
+it: compiled a throwaway probe file referencing both `indexedDB.open` and
+`fetch` under `lib: ["ES2022", "DOM"]` plus the ambient `@types/node`
+already in the workspace — clean, no duplicate-declaration errors — then
+deleted the probe. `packages/crdt`'s `lib: []`/`types: []` restriction
+(gate 1) is untouched; this only loosens `provider`, which was never
+gated.
+
+243 tests (22 new: 3 in `packages/crdt/src/encoding.test.ts` for
+`decodeOpsStream`, 19 across `packages/provider`'s three test files).
+Lint, typecheck, and both gates clean.

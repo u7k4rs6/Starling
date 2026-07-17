@@ -225,8 +225,15 @@ function deriveDeps(payload: CrdtPayload): ElemId[] {
   return payload.l === null ? [] : [payload.l];
 }
 
-export function decodeOps(bytes: Uint8Array): CrdtOp[] {
-  const pos = { i: 0 };
+/**
+ * Decodes exactly one `encodeOps` blob starting at `pos.i`, advancing `pos`
+ * past it and leaving any trailing bytes untouched. This is the primitive
+ * `decodeOps` and `decodeOpsStream` both build on: a blob is self-delimiting
+ * (its own replica table + record count say exactly how many bytes it
+ * occupies), so a position-aware decode is what makes concatenation of
+ * independently-encoded blobs decodable at all — see `decodeOpsStream`.
+ */
+function decodeOpsFrom(bytes: Uint8Array, pos: { i: number }): CrdtOp[] {
   const replicaCount = readVarUint(bytes, pos);
   const table: ReplicaId[] = [];
   for (let r = 0; r < replicaCount; r += 1) {
@@ -277,5 +284,29 @@ export function decodeOps(bytes: Uint8Array): CrdtOp[] {
     ops.push({ id, deps: deriveDeps(payload), payload });
   }
 
+  return ops;
+}
+
+export function decodeOps(bytes: Uint8Array): CrdtOp[] {
+  return decodeOpsFrom(bytes, { i: 0 });
+}
+
+/**
+ * Decodes a byte string that is the concatenation of zero or more
+ * independently-produced `encodeOps` blobs, in order. This is not a
+ * hypothetical: the relay (ARCH §5) is an append-only *byte* log with no
+ * message framing of its own — "it appends bytes and hands back bytes from
+ * an offset" — so a `GET /doc/:id?from=N` response spanning more than one
+ * client's `POST` is exactly this concatenation, and the provider's sync
+ * loop (ARCH §6) needs to decode all of it, not just the first blob.
+ * `decodeOps` alone would silently stop after the first blob's own
+ * recordCount and drop everything appended after it.
+ */
+export function decodeOpsStream(bytes: Uint8Array): CrdtOp[] {
+  const pos = { i: 0 };
+  const ops: CrdtOp[] = [];
+  while (pos.i < bytes.length) {
+    ops.push(...decodeOpsFrom(bytes, pos));
+  }
   return ops;
 }

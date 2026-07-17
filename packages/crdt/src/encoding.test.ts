@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ElemId } from "./elem-id.js";
 import {
   decodeOps,
+  decodeOpsStream,
   decodeUtf8,
   encodeOps,
   encodeUtf8,
@@ -213,6 +214,62 @@ describe("encodeOps / decodeOps round-trip", () => {
           }
           const decoded = decodeOps(encodeOps(ops));
           expect(decoded).toEqual(ops);
+        }
+      ),
+      { numRuns: 500 }
+    );
+  });
+});
+
+describe("decodeOpsStream: concatenated blobs (ARCH §5/§6 — the relay's raw byte log is many POSTs back to back)", () => {
+  it("an empty buffer (a doc nobody has pushed to yet) decodes to no ops", () => {
+    expect(decodeOpsStream(new Uint8Array(0))).toEqual([]);
+  });
+
+  it("a single blob decodes the same via decodeOpsStream as via decodeOps", () => {
+    const a0: ElemId = { replica: "A", counter: 0 };
+    const ops: CrdtOp[] = [makeInsert(a0, null, "h", "R")];
+    const bytes = encodeOps(ops);
+    expect(decodeOpsStream(bytes)).toEqual(decodeOps(bytes));
+  });
+
+  it("property: N independently-encoded batches concatenated decode to the flat concatenation of their ops", () => {
+    // Prediction: this should just work with no special-casing, because
+    // each encodeOps blob is self-delimiting (its own replica table +
+    // record count say exactly how many bytes it occupies) — the position-
+    // aware decoder should stop exactly at each blob's boundary on its own.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.array(
+            fc.record({ replica: fc.constantFrom("A", "B", "C"), char: fc.char() }),
+            { minLength: 0, maxLength: 8 }
+          ),
+          { minLength: 0, maxLength: 6 }
+        ),
+        (batches) => {
+          const allOps: CrdtOp[] = [];
+          const blobs: Uint8Array[] = [];
+          for (const batch of batches) {
+            const countersByReplica = new Map<string, number>();
+            const batchOps: CrdtOp[] = [];
+            for (const spec of batch) {
+              const counter = countersByReplica.get(spec.replica) ?? 0;
+              countersByReplica.set(spec.replica, counter + 1);
+              const id: ElemId = { replica: spec.replica, counter };
+              batchOps.push(makeInsert(id, null, spec.char));
+            }
+            blobs.push(encodeOps(batchOps));
+            allOps.push(...batchOps);
+          }
+          const totalLength = blobs.reduce((sum, b) => sum + b.length, 0);
+          const concatenated = new Uint8Array(totalLength);
+          let offset = 0;
+          for (const b of blobs) {
+            concatenated.set(b, offset);
+            offset += b.length;
+          }
+          expect(decodeOpsStream(concatenated)).toEqual(allOps);
         }
       ),
       { numRuns: 500 }
