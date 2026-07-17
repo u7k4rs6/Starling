@@ -48,6 +48,23 @@ const DB_VERSION = 1;
  * richer schema.
  */
 export class IndexedDbPersistence implements Persistence {
+  // Every load()/save() opens and closes its own connection (below) — an
+  // uncoordinated caller firing save() once per keystroke without
+  // awaiting each call (a real pattern: persistence must happen on every
+  // local edit regardless of online state, DECISIONS #0025, and a UI
+  // can't stall typing on an IndexedDB round trip) means several of
+  // these open+transaction+close sequences can be in flight at once,
+  // with no guarantee the one that *started* last is also the one that
+  // *commits* last. Found exactly this way: an e2e test typing a longer
+  // string while offline, reloading, and getting back only the string's
+  // first few characters — not corruption, just an earlier save's
+  // transaction committing after a later one's. Queuing every call onto
+  // one chain forces strict call-order execution, one at a time; this is
+  // the general fix (any caller, not just the demo's specific pattern),
+  // consistent with fixing bugs at the layer that owns the invariant
+  // rather than routing around them in a caller.
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly docId: string) {}
 
   private openDb(): Promise<IDBDatabase> {
@@ -61,7 +78,19 @@ export class IndexedDbPersistence implements Persistence {
     });
   }
 
-  async load(): Promise<PersistedState | null> {
+  load(): Promise<PersistedState | null> {
+    const result = this.queue.then(() => this.loadNow());
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  save(state: PersistedState): Promise<void> {
+    const result = this.queue.then(() => this.saveNow(state));
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async loadNow(): Promise<PersistedState | null> {
     const db = await this.openDb();
     try {
       return await new Promise((resolve, reject) => {
@@ -75,7 +104,7 @@ export class IndexedDbPersistence implements Persistence {
     }
   }
 
-  async save(state: PersistedState): Promise<void> {
+  private async saveNow(state: PersistedState): Promise<void> {
     const db = await this.openDb();
     try {
       await new Promise<void>((resolve, reject) => {

@@ -1334,3 +1334,200 @@ Reverted before committing.
 `packages/crdt/src/fugue-doc.test.ts`, 10 in the new
 `packages/editor/src/undo.test.ts`). Lint, typecheck, and both gates
 clean.
+
+## 0025 — Step 14: demo app, verified in a real Chromium via Playwright, not just built; six real bugs found by actually running it, none of them findable by unit tests alone
+
+Built `packages/demo`: React + Vite, `EditorPane` (owns one replica's
+`Doc`/`Provider`/`AwarenessClient`/ProseMirror `EditorView`, wired
+together — Step 9's DECISIONS #0020 note ("wiring Provider and the
+editor binding together is Step 14's job") finally cashed in), two
+panes plus a query-param-triggered solo third-replica view, connection
+toggles, pending counters, coloured remote cursors as widget
+decorations, a debounced sync/awareness poll loop, and the visual
+direction (near-monochrome shell, amber/teal as the only colour,
+self-hosted `@fontsource/space-grotesk` + `@fontsource/jetbrains-mono`
+— no Google Fonts CDN, SECURITY §1). This entry is long because this
+step, more than any other, produced findings a unit-test-only approach
+would not have caught: this repo has a real Chromium pre-installed, so
+FRONTEND §2.3's three demonstrations and F3-F7 were driven end to end
+with Playwright (`packages/demo/e2e/demo.spec.ts`) against the actual
+built app, not inferred from the pieces' own unit tests being green.
+Every one of the six bugs below was found by that suite failing first,
+not by inspection.
+
+**1. `schema.ts` had no `toDOM`, and nothing through Step 12 could have
+noticed.** The first real `EditorView` mount threw `node.type.spec.toDOM
+is not a function` — Step 12's binding was verified against the model
+layer only (FRONTEND §1.1, deliberately no `EditorView` in the loop), so
+a schema missing the DOM-rendering half of its node specs typechecked,
+built, and passed all 22 binding/undo tests without a single test ever
+constructing a view to expose the gap. Fixed by adding `toDOM`/`parseDOM`
+to `paragraph` (text nodes need neither, matching
+`prosemirror-schema-basic`'s own `text` spec). Worth naming plainly: this
+is exactly the kind of gap "headless, node-testable" is structurally
+unable to catch, by design — Step 12's own tests were never wrong, they
+were just never going to see this.
+
+**2. Cross-test relay-state leakage in the e2e suite, not a sync bug —
+looked exactly like one at first.** Playwright's `webServer` starts the
+dev relay once for the whole run; `config.ts`'s `DOC_ID` was a fixed
+constant (matching FRONTEND §2.5's "no document list"), so every test
+after the first inherited whatever text prior tests had already pushed.
+First symptom looked like a genuine convergence failure. Traced with a
+throwaway console-logging script before touching any source: two
+replicas typing different strings converged correctly; the "wrong" text
+was just accumulated history. Fixed by adding a `?doc=`/`?awareness=`
+URL-param override to `config.ts` (validated as UUID-shaped, silently
+ignored if malformed or absent — a stray visitor's URL never breaks
+anything), used only by the e2e suite (`beforeEach` mints a fresh pair
+per test) and carried forward by the third-replica button so a solo tab
+joins the *same* document instead of silently falling back to the fixed
+default.
+
+**3. The core bug: offline edits were never persisted, because
+persistence only ever happened inside `sync()` — and `sync()` is exactly
+the call an offline replica skips.** `Provider`'s own
+`insertLocal`/`deleteLocal`/`insertBefore` each call a private
+`persistNow()` after mutating `.doc`; `EditorPane` drives `.doc` directly
+through the editor binding instead (DECISIONS #0023's whole point — the
+binding needs `Doc`'s full API, not Provider's narrow network-facing
+one), which never touched `persistNow()` at all. Local edits were
+visible in the UI immediately (`.doc.text` is live) and looked completely
+normal until reload, at which point everything typed while offline was
+silently gone — the F6 e2e test caught it on the very first run.
+Confirmed the mechanism by reading IndexedDB directly after typing
+offline: `opLogBytes` was the *empty* `encodeOps([])` blob, two bytes,
+despite visible on-screen text. Fixed by making `persistNow()` public on
+`Provider` and calling it from `EditorPane` after every local edit
+(typing and undo both) regardless of online state — persistence must
+never depend on network state, which is the entire point of "offline
+edits survive reload" (ARCH §6, S9). Added a regression test at the
+`Provider` level (`provider.test.ts`): edit `.doc` directly, call
+`persistNow()`, reconstruct a fresh `Provider` from the same
+persistence, assert the reload sees it — mutation-tested by commenting
+out the `persistNow()` call, confirmed it fails exactly as expected.
+
+**4. `IndexedDbPersistence.save()` could commit out of call order under
+concurrent calls — a real race, found by the fix above exposing it.**
+Once every keystroke started calling `persistNow()`, reload tests
+recovered only a *prefix* of what was typed (e.g. "never-" instead of
+"never-left-this-browser") — not corruption, a partial, in-order-looking
+truncation, which was the tell. `save()` opens and closes its own
+IndexedDB connection on every call; nothing guaranteed the transaction
+from the *last* call was also the one to *commit* last once several were
+in flight at once. Fixed by serializing every `load()`/`save()` call
+through one `Promise` chain on the instance, forcing strict call-order
+execution — the general fix (protects any caller, not just this one
+call pattern), at the layer that owns the invariant. Honest caveat: a
+concurrency regression test was added
+(`persistence.test.ts`, "N unawaited save() calls... resolve in call
+order") and mutation-tested by removing the queue — it did **not**
+reproduce the failure under `fake-indexeddb`, three runs in a row.
+`fake-indexeddb`'s internal scheduling is apparently deterministic
+enough not to exhibit the interleaving real browser IndexedDB does. The
+fix's actual confirmation is the e2e suite (a real Chromium) going from
+failing to passing, not the unit test — logged plainly rather than
+implying the unit test proves what it doesn't; it stays because it
+documents the invariant and may still catch other ordering violations,
+not because it caught this one.
+
+**5. Debounced persistence, for a second reason beyond fix #4's queue.**
+Even serialized, dozens of sequential full IndexedDB open+transaction+
+close cycles for one typed sentence take long enough that a reload
+shortly after typing stops can still land before the queue drains —
+found by the same F6 test still failing (now with more of the string
+recovered, not none) after fix #4 alone. `EditorPane` now coalesces
+`persistNow()` calls into one, ~250ms after the last local edit, which
+is both the performance fix (one write instead of dozens) and what
+closes the reload-race window in practice; the e2e test itself was
+adjusted to wait past the debounce before reloading, matching FRONTEND
+§2.3.3's own framing ("reload the page while offline with pending
+ops" — a believable pause, not a zero-latency race the app never
+promised to win).
+
+**6. `UndoManager`'s own documented contract — "one call, one undo step,
+matching ordinary editor UX, not one character at a time" — was never
+actually honored by the code driving it.** `EditorPane` called
+`undoManager.record()` once per `dispatchTransaction`, and ordinary
+typing produces one ProseMirror transaction per keystroke, so a single
+Ctrl-Z undid exactly one character ("hello" → "hell"), not the word —
+the F4 e2e test caught this directly. Not a bug in `UndoManager` itself
+(Step 13's own unit tests, all still green, verify precisely what
+`record()`/`undo()` do per call) — the gap was between what its docstring
+promised and how the only real caller actually drove it. Fixed by
+buffering local ops in `EditorPane` and flushing them as one `record()`
+call after a 500ms pause, with an immediate flush before `undo()` itself
+runs (so a burst still being typed isn't stranded un-recorded by an
+undo that arrives before the pause window closes) — grouping policy
+lives at the UI layer, matching how real editors decide "what counts as
+one undo step" as a UX choice, not a core-mechanism one.
+
+**Two things chased that turned out not to be bugs, logged for the same
+reason the real ones were.** First: clicking pane B to type into it (an
+artifact of both replicas sharing one browser tab in the e2e suite — a
+real second user's separate browser would never do this to pane A's
+focus) moves DOM focus away from pane A, so the F3 test's follow-up
+keystroke initially typed nowhere useful; fixed the *test*
+(`.focus()`, not `.click()`, to reclaim focus without repositioning the
+already-anchor-correct selection) rather than the app. Second, a fourth
+instance of the DECISIONS #0022/#0024 pattern: F3 asserted the merged
+text couldn't *start* with `"!"`, assuming `"hello "` would render before
+`"world"` — measured `"!worldhello "` instead, B's insert (causally
+anchored before A's cursor) rendering *after* it in the final string
+because of Fugue's counter tie-break, not intent or arrival order. The
+test's actual claim (the cursor followed the character it was anchored
+to, proven by `"!world"` landing adjacent) never needed the ordering
+assumption; removed it rather than construct an artificial scenario to
+force a specific rendered string.
+
+Design choices made without a specific doc citation, stated plainly:
+fixed `DOC_ID`/`AWARENESS_ID` UUIDs (FRONTEND §2.5's "no document list"
+read literally — one demo, one document, always); each pane's
+`IndexedDbPersistence` key is `${docId}:${paneId}`, not just `docId` —
+two "independent replicas" sharing one physical browser need separate
+local-storage namespaces for something that would, in reality, be two
+separate devices; a stable per-pane replica id in `localStorage`
+(generated once, kept across reloads — S9 requires *the same* replica
+resuming, not a fresh one); the third-replica view reuses one of the
+two accent colours rather than needing a third, since the point being
+demonstrated (two is not a special case) doesn't need three
+simultaneously-visible ones to make it; two self-hosted type families
+via `@fontsource` (Space Grotesk for display/UI text, JetBrains Mono for
+editor content and numeric readouts) rather than three separate
+families for FRONTEND §3's "one display face, one text face, one
+mono" — a defensible reading of that line, not a literal one, given
+this demo's own minimalism mandate.
+
+**A seventh fix, found by reasoning while wiring `runUndo`, before any
+Playwright run — not part of the "six bugs the suite caught" count
+above.** Writing `EditorPane`'s undo handler surfaced the same pre-batch-
+integration hazard `opsToSteps` was built to avoid (DECISIONS #0023),
+this time on `UndoManager.undo()`'s own output: converting a whole
+batch's ops to PM steps *after* `undo()` had already fully applied all of
+them would compute each step's position against the already-fully-undone
+tree, not the tree as it stood right after the *previous* step — wrong
+for anything beyond a simple contiguous-prefix batch. Fixed by giving
+`undo()` an `onOp` callback invoked immediately after each sub-op is
+created (`undo.ts`), the same interleaving discipline `opsToSteps`
+already has. Verified with a sharper test than Step 13's original:
+undoing two non-adjacent inserts with unrelated live content between
+them — hand-predicted the exact wrong result a non-interleaved version
+would produce ("xBz" instead of "xyz") before writing the fix, then
+confirmed it by temporarily reverting to the post-hoc form and getting
+that exact string. Lands in `packages/editor/src/undo.test.ts` (Step
+13's file) since it's `UndoManager`'s own contract, even though the gap
+was found while building Step 14.
+
+299 tests (11 new e2e specs run via `playwright test`, not `vitest` —
+outside the 288-test `pnpm run test` count above; 5 new unit tests: 2
+concurrency tests in `persistence.test.ts`, 2 in `provider.test.ts`
+(the `.doc`-exposure test and the `persistNow()` regression test), and
+1 in `undo.test.ts` — the non-adjacent-inserts `onOp` interleaving test
+from the seventh fix above). Lint, typecheck (a fourth standalone step,
+`packages/demo/tsconfig.e2e.json`, mirroring the
+Step 7/10 pattern for out-of-normal-scope test files — here because the
+e2e suite needs DOM lib types `tsc -b`'s composite build doesn't carry),
+and both gates clean. The e2e suite itself isn't part of `pnpm run
+test`/CI's normal vitest run (Playwright, a different runner, a real
+browser) — run via `pnpm --filter @starling/demo run e2e`, documented
+here rather than silently absent from the numbers above.

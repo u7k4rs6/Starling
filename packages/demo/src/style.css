@@ -1,0 +1,206 @@
+/* FRONTEND §3: "network instrument, not a document app" — near-
+   monochrome shell; colour carries exactly one meaning (replica
+   identity, via --replica-color, set per pane in EditorPane.tsx);
+   connection state is form (dot filled/hollow), never colour; almost no
+   motion, with the whole animation budget spent on the convergence
+   moment. Self-hosted fonts only (SECURITY §1's no-third-party-requests
+   rule reaches typography too — no Google Fonts CDN). */
+
+:root {
+  --bg: #0b0c0e;
+  --panel: #131518;
+  --border: #2a2d32;
+  --text: #e4e6ea;
+  --text-dim: #8a8f98;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --display: "Space Grotesk", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--display);
+  font-size: 14px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-title {
+  font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
+
+.third-replica-button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--display);
+  font-size: 0.78rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.third-replica-button:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.panes {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+}
+
+.panes-solo {
+  grid-template-columns: 1fr;
+}
+
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+
+.editor-pane:last-child {
+  border-right: none;
+}
+
+.editor-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.replica-label {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--replica-color, var(--text));
+}
+
+/* Connection state is drawn as filled vs hollow — form, not hue
+   (FRONTEND §3): the dot always uses --replica-color, online/offline is
+   told apart by fill alone. */
+.connection-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--replica-color, var(--text-dim));
+}
+
+.connection-dot.online {
+  background: var(--replica-color, var(--text-dim));
+}
+
+.connection-dot.offline {
+  background: transparent;
+}
+
+.editor-surface {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.editor-surface .ProseMirror {
+  outline: none;
+  min-height: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.remote-cursor {
+  position: relative;
+  border-left: 2px solid var(--cursor-color);
+  margin-left: -1px;
+}
+
+.remote-cursor-label {
+  position: absolute;
+  top: -1.15em;
+  left: -2px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: #0b0c0e;
+  background: var(--cursor-color);
+  padding: 0 3px;
+  border-radius: 2px;
+  white-space: nowrap;
+  /* Almost no motion in this UI (FRONTEND §3) — the one exception is the
+     convergence moment on the pending counter, not this label. */
+}
+
+.editor-pane-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.8rem;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.connection-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pending-counter {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The whole animation budget (FRONTEND §3): the pending counter gets a
+   brief highlight exactly when it drains to zero — the convergence
+   moment — and nothing else in this UI animates. */
+.pending-counter.just-converged {
+  animation: converge-flash 900ms ease-out;
+}
+
+@keyframes converge-flash {
+  0% {
+    color: var(--replica-color, var(--text));
+  }
+  100% {
+    color: var(--text-dim);
+  }
+}

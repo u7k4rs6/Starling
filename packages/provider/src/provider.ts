@@ -16,7 +16,7 @@ export class Provider {
   private relayReadOffset: number;
 
   private constructor(
-    private readonly doc: Doc,
+    private readonly _doc: Doc,
     private readonly persistence: Persistence,
     private readonly transport: RelayTransport,
     lastPushedVector: StateVector,
@@ -46,7 +46,27 @@ export class Provider {
   }
 
   get text(): string {
-    return this.doc.text;
+    return this._doc.text;
+  }
+
+  /**
+   * The shared `Doc` this provider syncs and persists. Exposed so a
+   * higher layer (the editor binding, `packages/editor`) can drive local
+   * edits and read anchors directly against the *same* instance instead
+   * of Provider growing a parallel, editor-shaped API surface it has no
+   * other reason to own — Provider's own job stays network/persistence
+   * glue (ARCH §6), not a facade over every `Doc` method a caller might
+   * want. `transactionToOps`/`opsToSteps`/`anchorAt`/`resolveAnchor`
+   * (`packages/editor`) all take a `Doc` directly for this reason
+   * (DECISIONS #0023) — this getter is what lets a caller give them the
+   * *right* one instead of constructing an unrelated second `Doc` that
+   * would silently diverge from whatever this provider is syncing.
+   * `insertLocal`/`deleteLocal`/`insertBefore` below remain for callers
+   * that only need single-character edits and don't want to manage
+   * persistence timing themselves.
+   */
+  get doc(): Doc {
+    return this._doc;
   }
 
   /** ARCH §6 / 04-FRONTEND.md F-panel: "Pending op counter per replica...
@@ -54,27 +74,40 @@ export class Provider {
    * ARCH §6 gives for the whole offline story — not a separate tracked
    * count, computed fresh each call. */
   pendingCount(): number {
-    return this.doc.missingFrom(this.lastPushedVector).length;
+    return this._doc.missingFrom(this.lastPushedVector).length;
   }
 
   insertLocal(visibleIndex: number, char: string): Promise<void> {
-    this.doc.insertLocal(visibleIndex, char);
+    this._doc.insertLocal(visibleIndex, char);
     return this.persistNow();
   }
 
   deleteLocal(visibleIndex: number): Promise<void> {
-    this.doc.deleteLocal(visibleIndex);
+    this._doc.deleteLocal(visibleIndex);
     return this.persistNow();
   }
 
   insertBefore(tombstoneId: ElemId, char: string): Promise<void> {
-    this.doc.insertBefore(tombstoneId, char);
+    this._doc.insertBefore(tombstoneId, char);
     return this.persistNow();
   }
 
-  private persistNow(): Promise<void> {
+  /**
+   * Public so a caller driving `.doc` directly (the editor binding,
+   * DECISIONS #0025) can persist a local edit immediately, the same as
+   * `insertLocal`/`deleteLocal`/`insertBefore` above already do for
+   * themselves. This matters independent of network state, not just as
+   * a convenience: persistence must never depend on `sync()` having run,
+   * because `sync()` is exactly the call an offline replica *skips* —
+   * and "offline edits survive reload" (ARCH §6, S9) requires them
+   * persisted the moment they're made, not only once a connection comes
+   * back. Idempotent to call redundantly (it's a full resave of current
+   * state, not an append), so callers that also get it "for free" via
+   * `sync()`'s own final call don't need to worry about calling it twice.
+   */
+  persistNow(): Promise<void> {
     return this.persistence.save({
-      opLogBytes: encodeOps(this.doc.missingFrom(new Map())),
+      opLogBytes: encodeOps(this._doc.missingFrom(new Map())),
       lastPushedVectorEntries: [...this.lastPushedVector.entries()],
       relayReadOffset: this.relayReadOffset,
     });
@@ -94,7 +127,7 @@ export class Provider {
     const pulled = await this.transport.read(this.relayReadOffset);
     if (pulled.length > 0) {
       const ops = decodeOpsStream(pulled);
-      for (const op of ops) this.doc.receive(op);
+      for (const op of ops) this._doc.receive(op);
       for (const op of ops) {
         const known = this.lastPushedVector.get(op.id.replica) ?? -1;
         if (op.id.counter > known) this.lastPushedVector.set(op.id.replica, op.id.counter);
@@ -102,7 +135,7 @@ export class Provider {
       this.relayReadOffset += pulled.length;
     }
 
-    const missing = this.doc.missingFrom(this.lastPushedVector);
+    const missing = this._doc.missingFrom(this.lastPushedVector);
     if (missing.length > 0) {
       await this.transport.append(encodeOps(missing));
       for (const op of missing) {

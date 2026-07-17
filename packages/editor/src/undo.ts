@@ -53,22 +53,35 @@ export class UndoManager {
     return this.stack.length > 0;
   }
 
-  /** Pops the last recorded batch and applies its inverse to `doc`,
-   * entry by entry in reverse — the standard "undo the last sub-edit of
-   * the batch first" order, same as undoing a multi-step edit anywhere
-   * else. Returns the new ops this undo itself created, for the caller
-   * to turn into ProseMirror steps. Throws if the stack is empty; check
-   * `canUndo()` first, same convention as `Doc`'s own id-lookup methods
-   * failing loudly rather than silently no-op'ing. */
-  undo(doc: Doc): CrdtOp[] {
+  /**
+   * Pops the last recorded batch and applies its inverse to `doc`, entry
+   * by entry in reverse — the standard "undo the last sub-edit of the
+   * batch first" order, same as undoing a multi-step edit anywhere else.
+   * Throws if the stack is empty; check `canUndo()` first, same
+   * convention as `Doc`'s own id-lookup methods failing loudly rather
+   * than silently no-op'ing.
+   *
+   * `onOp`, if given, is called immediately after *each* sub-op is
+   * created — not after the whole batch. This matters, not just as a
+   * convenience: `opToStep` (`binding.ts`) computes a position via
+   * `doc.resolveAnchor`, which reflects the *entire current tree*. If a
+   * caller instead waited for `undo()` to finish and then called
+   * `opToStep` on the returned array, every op in the batch would already
+   * be fully integrated by the time any position was computed — the same
+   * "pre-integrating the whole batch" hazard `opsToSteps` was written to
+   * avoid (DECISIONS #0023), here on undo's own ops instead of remote
+   * ones. `onOp` is what lets the caller interleave correctly, the same
+   * shape `opsToSteps`'s own loop already uses internally.
+   */
+  undo(doc: Doc, onOp?: (op: CrdtOp) => void): CrdtOp[] {
     const entries = this.stack.pop();
     if (entries === undefined) throw new Error("editor: nothing to undo");
     const inverseOps: CrdtOp[] = [];
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       const entry = entries[i]!;
-      inverseOps.push(
-        entry.kind === "insert" ? doc.deleteById(entry.id) : doc.insertBefore(entry.tombstoneId, entry.char)
-      );
+      const op = entry.kind === "insert" ? doc.deleteById(entry.id) : doc.insertBefore(entry.tombstoneId, entry.char);
+      inverseOps.push(op);
+      onOp?.(op);
     }
     return inverseOps;
   }

@@ -30,6 +30,54 @@ class FakeRelay {
   }
 }
 
+describe("Provider.doc: exposes the same instance sync/persistence operate on", () => {
+  it("edits made directly on .doc are visible via .text and get synced, without going through insertLocal", async () => {
+    const relay = new FakeRelay();
+    const transport = relay.forDoc("d1");
+    const p = await Provider.create("r1", new InMemoryPersistence(), transport);
+
+    // Bypassing Provider's own insertLocal entirely — this is exactly
+    // what the editor binding does (transactionToOps operates on a Doc
+    // directly, DECISIONS #0023) — and sync() must still pick it up,
+    // proving .doc is the *same* instance sync()/pendingCount() use, not
+    // an unrelated copy.
+    p.doc.insertLocal(0, "x");
+    expect(p.text).toBe("x");
+    expect(p.pendingCount()).toBe(1);
+
+    await p.sync();
+    expect(p.pendingCount()).toBe(0);
+
+    const other = await Provider.create("r2", new InMemoryPersistence(), transport);
+    await other.sync();
+    expect(other.text).toBe("x");
+  });
+
+  it("persistNow() persists a .doc-direct edit without ever calling sync() — the offline-editing case", async () => {
+    // Found via the demo (packages/demo, Step 14): a real offline-reload
+    // bug, not a hypothetical. The editor binding drives `.doc` directly
+    // and never calls sync() while a replica is deliberately offline —
+    // if persistence only ever happened inside sync() (as it did before
+    // persistNow() was made public), an edit made while offline was
+    // visible in .text immediately but silently never reached
+    // IndexedDB, so reloading lost it. This test is the regression this
+    // production bug turned into.
+    const relay = new FakeRelay();
+    const persistence = new InMemoryPersistence();
+    const transport = relay.forDoc("d1");
+    const p = await Provider.create("r1", persistence, transport);
+
+    for (const [i, ch] of [..."offline"].entries()) p.doc.insertLocal(i, ch);
+    await p.persistNow();
+
+    const reloaded = await Provider.create("r1", persistence, transport);
+    expect(reloaded.text).toBe(p.text);
+    // Never synced — nothing reached the relay, on purpose (this is the
+    // "still offline" case, not "came back online").
+    expect(reloaded.pendingCount()).toBeGreaterThan(0);
+  });
+});
+
 describe("Provider: local edits and persistence", () => {
   it("insertLocal/deleteLocal update .text immediately", async () => {
     const relay = new FakeRelay();

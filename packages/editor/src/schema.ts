@@ -18,7 +18,14 @@ import { Schema } from "prosemirror-model";
 export const schema = new Schema({
   nodes: {
     doc: { content: "paragraph" },
-    paragraph: { content: "text*" },
+    // `toDOM`/`parseDOM` were never needed through Step 12: the binding
+    // is verified against the model layer only, with no `EditorView` in
+    // the loop (FRONTEND §1.1 — no jsdom, no browser). `text` needs
+    // neither (leaf text nodes render as plain DOM text automatically,
+    // same as prosemirror-schema-basic's own `text` spec has none) —
+    // `paragraph` is the one node an actual view (packages/demo, Step 14)
+    // has to know how to draw.
+    paragraph: { content: "text*", toDOM: () => ["p", 0], parseDOM: [{ tag: "p" }] },
     text: { inline: true },
   },
 });

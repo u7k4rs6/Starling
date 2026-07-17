@@ -176,15 +176,51 @@ describe("Undo composes with the ProseMirror binding (opToStep)", () => {
     let state = EditorState.create({ doc: pmDocFromDoc(doc) });
     expect(state.doc.textContent).toBe("abc");
 
-    const inverseOps = undoManager.undo(doc);
-    for (const op of inverseOps) {
+    undoManager.undo(doc, (op) => {
       const step = opToStep(op, doc);
       const result = step.apply(state.doc);
       if (!result.doc) throw new Error("step application failed");
       state = EditorState.create({ doc: result.doc });
-    }
+    });
     expect(doc.text).toBe("");
     expect(state.doc.textContent).toBe("");
+  });
+
+  it("undoing two non-adjacent inserts (live content between them) restores the exact original text — proves onOp's interleaving is load-bearing, not cosmetic", () => {
+    // Prediction, stated before writing the fix: computing every step
+    // *after* the whole batch is already integrated (the bug this test
+    // is built to catch) would compute each op's position against the
+    // fully-undone tree instead of the tree as it stood right after the
+    // *previous* step in the batch — for two inserts with unrelated live
+    // content between them, that's not a cosmetic difference, it deletes
+    // the wrong characters entirely. Hand-derived expected wrong output
+    // for the non-interleaved version, to be sure this test would
+    // actually fail without the fix: starting from "xAyBz" (batch
+    // inserted 'A' at index 1 and 'B' at index 3 into pre-existing
+    // "xyz"), computing both positions post-hoc against the fully-
+    // reverted "xyz" tree and applying them in sequence deletes 'y' then
+    // 'A' — landing on "xBz", not "xyz".
+    const doc = new Doc("A");
+    for (const ch of "xyz") doc.insertLocal(doc.text.length, ch);
+    const insertA = doc.insertLocal(1, "A"); // "xAyz"
+    const insertB = doc.insertLocal(3, "B"); // "xAyBz"
+    expect(doc.text).toBe("xAyBz");
+
+    const undoManager = new UndoManager();
+    undoManager.record([insertA, insertB], doc);
+
+    let state = EditorState.create({ doc: pmDocFromDoc(doc) });
+    expect(state.doc.textContent).toBe("xAyBz");
+
+    undoManager.undo(doc, (op) => {
+      const step = opToStep(op, doc);
+      const result = step.apply(state.doc);
+      if (!result.doc) throw new Error("step application failed");
+      state = EditorState.create({ doc: result.doc });
+    });
+
+    expect(doc.text).toBe("xyz");
+    expect(state.doc.textContent).toBe("xyz");
   });
 });
 

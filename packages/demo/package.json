@@ -5,7 +5,30 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "vite",
+    "dev:relay": "node scripts/dev-relay.mjs",
+    "build": "vite build",
+    "e2e": "playwright test"
+  },
   "dependencies": {
-    "@starling/editor": "workspace:*"
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
+    "@starling/editor": "workspace:*",
+    "@starling/provider": "workspace:*",
+    "prosemirror-keymap": "^1.2.3",
+    "prosemirror-state": "^1.4.4",
+    "prosemirror-view": "^1.42.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "starling-crdt": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@starling/relay": "workspace:*",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.5"
   }
 }
