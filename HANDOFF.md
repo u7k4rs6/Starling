@@ -6,6 +6,54 @@ log — 28 numbered entries, every wrong prediction and every bug included)
 plus a section that doesn't exist anywhere else yet: where I'd bet
 something breaks first once this is actually running in public.
 
+## Audit follow-up (post-handoff) — read this first
+
+A correctness/security/publish audit ran after this handoff and landed a
+series of gated, individually-tested fixes on `main`. The narrative below is
+the original handoff and is left intact as a historical record; where it and
+this section disagree, this section is current. Suite is now **326 tests**
+green (was 289), both isolation gates green, lint and all four typecheck
+configs clean.
+
+- **F-1 — late-joiner ordering (correctness).** `ElemId` ordered by a bare
+  per-replica counter, so a replica joining an existing document placed its
+  inserts in the wrong position. Added a Lamport `clock` to the id
+  (identity/ordering split into `ElemRef`/`ElemId`), one varint/op on the
+  wire. Convergence always held; *intention* didn't.
+- **F-2 — id reuse after reload (correctness).** Replaying a persisted log
+  into a fresh `Doc` with the same replica id restarted the counter at 0 and
+  reissued used ids, silently dropping edits. `reserveOwnId` advances the
+  counter past any own-op seen via `receive`.
+- **F-6 — test blind spot.** The suite only asserted convergence, never
+  intention, and never exercised edit-after-receive — which is why F-1/F-2
+  hid. Added an intention property, an edit-after-receive convergence
+  generator with a coverage proof, and pointed the adversarial network sim
+  at the production `Doc`.
+- **F-8 — the O(n²) cold-open (fragility #1 below).** `Doc` replay was 168s
+  at 100k, the headline Yjs loss. Fixed: `size`/`liveSize` are recomputed
+  lazily in bulk rather than walked to the root per op, so cold-open replay
+  is now O(n) (~110ms at 100k) and **S6 passes for `Doc`**. Local `build`
+  and interactive-after-remote editing remain super-linear — the treap-backed
+  Fugue (ARCH §2.5) is still the fix for *that* half.
+- **F-4 — relay eviction (correctness).** A disk-persisted doc evicted from
+  the in-memory cache was served as empty and could desync on the next
+  append. The map is now a cache over disk: it re-hydrates on a miss.
+- **F-5 — provider sync (robustness).** `sync()` is now serialized (no
+  cursor-corrupting re-entrancy), and a malformed/torn relay tail no longer
+  wedges the sync loop (`decodeOpsStreamPartial`).
+- **F-3 — relay security (fragilities #3/#4 below).** Origin is now enforced
+  server-side on writes, not just via CORS headers; the per-IP rate limit
+  can follow `X-Forwarded-For` behind a trusted proxy (opt-in
+  `trustedProxyDepth`, default off). Auth/malicious-peer remain out of scope
+  by design (SECURITY §4).
+- **F-10 — pnpm 10+ install.** A stock `pnpm install` / CI failed on a
+  skipped esbuild build script; declared as a deliberate skip so CI is green
+  again without granting any build script execution (SECURITY §3).
+
+Still open (unfixed, by scope): fragility #2 (no compaction/snapshotting),
+the `build`/interactive half of #1 (treap-backed Fugue), and the deliberate
+non-goals in SECURITY §4.
+
 ## What this is
 
 A from-scratch CRDT collaborative text editor (Fugue/RGA), built
@@ -106,7 +154,8 @@ Ranked roughly by how much I'd worry about each, most first. These are
 things I noticed while building, not things I've been told are wrong —
 treat them as a punch list, not a confession.
 
-1. **`Doc`'s cold-open cost is O(n²) for a long, forward-typed document —
+1. **[COLD-OPEN FIXED — see Audit follow-up, F-8. Local `build`/interactive
+   half still open.]** **`Doc`'s cold-open cost is O(n²) for a long, forward-typed document —
    168 seconds at 100k characters, against a 1-second target.** Root
    cause: every single edit walks from the changed node to the tree root
    to keep size counters current (`propagateSizesUp` in
@@ -134,7 +183,9 @@ treat them as a punch list, not a confession.
    without bound too. There's no garbage collection of tombstones or old
    awareness messages anywhere in this codebase.
 
-3. **The relay trusts `req.socket.remoteAddress` directly for both rate
+3. **[PARTLY ADDRESSED — see Audit follow-up, F-3b: opt-in `trustedProxyDepth`
+   makes the rate limit proxy-aware; connection limiting stays socket-based.]**
+   **The relay trusts `req.socket.remoteAddress` directly for both rate
    limiting and connection limiting** (`packages/relay/src/server.ts`),
    with no `X-Forwarded-For`/proxy handling. Almost every hosting
    platform (Fly.io, Render, Railway, anything behind a load balancer or
