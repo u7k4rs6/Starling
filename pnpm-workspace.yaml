@@ -1,14 +1,19 @@
 packages:
   - "packages/*"
 
-allowBuilds:
-  esbuild: set this to true or false
-
-# docs/DECISIONS.md #0005. pnpm 10 already refuses to run dependency
-# postinstall/preinstall/install scripts unless allow-listed here — that
-# default is what SECURITY §3 means by "no install scripts." Asserting it
-# explicitly, empty, turns a default that happens to point the right way
-# into an invariant that fails loudly (a future pnpm major that changes the
-# default, or a contributor who adds an entry without discussion, both show
-# up as a real diff instead of a silent behavior change).
+# docs/DECISIONS.md #0005 / SECURITY §3 ("no install scripts"): no dependency
+# may run a postinstall/preinstall/install build script. The empty allow-list
+# is asserted so the invariant fails loudly if a default changes or someone
+# adds an entry without discussion.
 onlyBuiltDependencies: []
+
+# esbuild (dev-only, pulled in by vite/vitest) ships an install script. pnpm
+# 10+ refuses to silently skip it — a stock `pnpm install` / CI run errors
+# (ERR_PNPM_IGNORED_BUILDS) until the skip is an explicit, recorded decision.
+# The decision is NO, per §3: esbuild's per-platform binary resolves through
+# its optional platform packages, the whole suite runs without the script, so
+# there is no reason to grant it execution.
+allowBuilds:
+  esbuild: false
+ignoredBuiltDependencies:
+  - esbuild
