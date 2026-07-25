@@ -1,4 +1,4 @@
-import { decodeOps, decodeOpsStream, Doc, encodeOps, type ElemId, type ReplicaId, type StateVector } from "starling-crdt";
+import { decodeOps, decodeOpsStreamPartial, Doc, encodeOps, type ElemId, type ReplicaId, type StateVector } from "starling-crdt";
 import type { Persistence } from "./persistence.js";
 import type { RelayTransport } from "./transport.js";
 
@@ -14,6 +14,10 @@ import type { RelayTransport } from "./transport.js";
 export class Provider {
   private lastPushedVector: StateVector;
   private relayReadOffset: number;
+  /** Serialises `sync()` — see the method for why overlapping runs corrupt
+   * the read cursor. Same one-promise-chain shape `IndexedDbPersistence`
+   * uses to force strict call-order execution. */
+  private syncChain: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly _doc: Doc,
@@ -114,6 +118,25 @@ export class Provider {
   }
 
   /**
+   * Sync against the relay. Safe to call concurrently: runs are serialised
+   * (see below). The returned promise resolves when *this* call's sync has
+   * completed.
+   */
+  sync(): Promise<void> {
+    // Serialise: two runs that interleave both read from the same
+    // `relayReadOffset` and then each advance it, double-counting the delta
+    // and skipping bytes that were never applied — permanent, silent data
+    // loss. An interval tick firing again before the previous sync's awaits
+    // resolve (exactly the demo's loop) is how that happens. Chaining every
+    // call onto one promise runs them strictly one at a time, in call order.
+    const result = this.syncChain.then(() => this.syncNow());
+    // The chain swallows failures so one bad sync doesn't reject every future
+    // one; the returned promise still rejects for *this* caller.
+    this.syncChain = result.catch(() => undefined);
+    return result;
+  }
+
+  /**
    * "Reconnect, ask the relay for its cursor, compute the delta, push"
    * (ARCH §6), in that order: pull first so a push never re-derives a
    * delta against a vector that's already stale.
@@ -123,16 +146,21 @@ export class Provider {
    * full vector also covers this replica's own not-yet-pushed local
    * edits, which still need to go out.
    */
-  async sync(): Promise<void> {
+  private async syncNow(): Promise<void> {
     const pulled = await this.transport.read(this.relayReadOffset);
     if (pulled.length > 0) {
-      const ops = decodeOpsStream(pulled);
+      // Decode only whole blobs and advance the cursor by exactly what was
+      // consumed. A relay read can end mid-blob (the log is unframed bytes,
+      // ARCH §5); advancing by the full response length past an undecodable
+      // tail would skip real ops, and throwing on it would wedge every
+      // future sync — and its push/persist half — on the same offset.
+      const { ops, bytesConsumed } = decodeOpsStreamPartial(pulled);
       for (const op of ops) this._doc.receive(op);
       for (const op of ops) {
         const known = this.lastPushedVector.get(op.id.replica) ?? -1;
         if (op.id.counter > known) this.lastPushedVector.set(op.id.replica, op.id.counter);
       }
-      this.relayReadOffset += pulled.length;
+      this.relayReadOffset += bytesConsumed;
     }
 
     const missing = this._doc.missingFrom(this.lastPushedVector);

@@ -4,6 +4,7 @@ import { toRef, type ElemId, type ElemRef } from "./elem-id.js";
 import {
   decodeOps,
   decodeOpsStream,
+  decodeOpsStreamPartial,
   decodeUtf8,
   encodeOps,
   encodeUtf8,
@@ -282,6 +283,44 @@ describe("decodeOpsStream: concatenated blobs (ARCH §5/§6 — the relay's raw 
       ),
       { numRuns: 500 }
     );
+  });
+});
+
+describe("decodeOpsStreamPartial: tolerant of a truncated trailing blob (F-5)", () => {
+  it("decodes every complete blob and stops at a truncated tail, reporting bytes consumed", () => {
+    const a0: ElemId = { replica: "A", counter: 0, clock: 1 };
+    const blob1 = encodeOps([makeInsert(a0, null, "h", "R")]);
+    // blob1 followed by a lone 0x80: a varint continuation byte with no
+    // follower — an interrupted length prefix whose rest never arrived.
+    const truncated = new Uint8Array(blob1.length + 1);
+    truncated.set(blob1, 0);
+    truncated[blob1.length] = 0x80;
+
+    const { ops, bytesConsumed } = decodeOpsStreamPartial(truncated);
+    expect(bytesConsumed).toBe(blob1.length); // stopped at the clean boundary
+    expect(ops).toEqual(decodeOps(blob1)); // exactly blob1's ops, nothing partial
+  });
+
+  it("consumes the whole buffer and matches decodeOpsStream when every blob is complete", () => {
+    const a0: ElemId = { replica: "A", counter: 0, clock: 1 };
+    const a1: ElemId = { replica: "A", counter: 1, clock: 2 };
+    const blobs = new Uint8Array([
+      ...encodeOps([makeInsert(a0, null, "h", "R")]),
+      ...encodeOps([makeInsert(a1, a0, "i", "R")]),
+    ]);
+    const { ops, bytesConsumed } = decodeOpsStreamPartial(blobs);
+    expect(bytesConsumed).toBe(blobs.length);
+    expect(ops).toEqual(decodeOpsStream(blobs));
+  });
+
+  it("returns nothing and consumes nothing on leading garbage, without throwing", () => {
+    const { ops, bytesConsumed } = decodeOpsStreamPartial(new Uint8Array([0x80]));
+    expect(ops).toEqual([]);
+    expect(bytesConsumed).toBe(0);
+  });
+
+  it("an empty buffer decodes to no ops and zero bytes consumed", () => {
+    expect(decodeOpsStreamPartial(new Uint8Array(0))).toEqual({ ops: [], bytesConsumed: 0 });
   });
 });
 

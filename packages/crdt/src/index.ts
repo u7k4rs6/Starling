@@ -9,5 +9,5 @@ export type { CrdtOp, CrdtPayload, DeletePayload, InsertPayload } from "./array-
 export { RgaDoc } from "./rga-doc.js";
 export { Doc } from "./fugue-doc.js";
 export type { Anchor, AnchorSide } from "./fugue-doc.js";
-export { decodeOps, decodeOpsStream, encodeOps } from "./encoding.js";
+export { decodeOps, decodeOpsStream, decodeOpsStreamPartial, encodeOps } from "./encoding.js";
 export type { StateVector } from "./sequence.js";

@@ -1,3 +1,4 @@
+import { Doc, encodeOps } from "starling-crdt";
 import { describe, expect, it } from "vitest";
 import { InMemoryPersistence } from "./persistence.js";
 import { Provider } from "./provider.js";
@@ -215,5 +216,67 @@ describe("Provider: sync loop convergence and idempotence", () => {
     expect(a!.text).toBe(b!.text);
     expect(b!.text).toBe(c!.text);
     expect(a!.text).toHaveLength(3);
+  });
+});
+
+describe("Provider: sync robustness (F-5)", () => {
+  it("concurrent sync() calls do not double-advance the read cursor or drop ops", async () => {
+    const relay = new FakeRelay();
+    const transport = relay.forDoc("d1");
+    const a = await Provider.create("A", new InMemoryPersistence(), transport);
+    await a.insertLocal(0, "x");
+    await a.sync(); // A's op is on the relay
+
+    const b = await Provider.create("B", new InMemoryPersistence(), transport);
+    // Fire two syncs without awaiting between them — the overlap the demo's
+    // interval tick produces. Unserialised, both read from offset 0 and both
+    // then advance the cursor, leaving it at 2×(A's blob length): past the
+    // real end. A later op from A would then be skipped forever.
+    await Promise.all([b.sync(), b.sync()]);
+    expect(b.text).toBe("x");
+
+    // Prove the cursor is exactly at the relay's length, not past it: a new
+    // op from A must still be picked up.
+    await a.insertLocal(1, "y");
+    await a.sync();
+    await b.sync();
+    expect(b.text).toBe("xy");
+  });
+
+  it("a malformed trailing blob doesn't throw or wedge sync; the complete prefix still applies", async () => {
+    const relay = new FakeRelay();
+    const transport = relay.forDoc("d1");
+
+    const src = new Doc("src");
+    const blob = encodeOps([src.insertLocal(0, "h"), src.insertLocal(1, "i")]);
+    await transport.append(blob); // one complete blob → "hi"
+    await transport.append(new Uint8Array([0xff, 0xff, 0xff])); // garbage tail
+
+    const p = await Provider.create("r1", new InMemoryPersistence(), transport);
+    // Before the fix, decodeOpsStream threw here and every subsequent sync
+    // re-read the same bytes and threw again — a permanent wedge.
+    await expect(p.sync()).resolves.toBeUndefined();
+    expect(p.text).toBe("hi");
+    // Still not wedged: a second sync also completes cleanly rather than
+    // throwing on the same garbage.
+    await expect(p.sync()).resolves.toBeUndefined();
+    expect(p.text).toBe("hi");
+  });
+
+  it("garbage already on the relay doesn't block the provider's own push/persist half", async () => {
+    const relay = new FakeRelay();
+    const transport = relay.forDoc("d1");
+    await transport.append(new Uint8Array([0xff, 0xff, 0xff, 0xff])); // pre-existing garbage
+
+    const persistence = new InMemoryPersistence();
+    const p = await Provider.create("r1", persistence, transport);
+    p.doc.insertLocal(0, "z"); // a local edit, not yet persisted (direct on .doc)
+
+    // The pull half hits garbage. Before the fix it threw, so persistNow()
+    // never ran and this offline edit was lost on reload. It must not throw,
+    // and the local edit must survive a reload from persistence.
+    await expect(p.sync()).resolves.toBeUndefined();
+    const reloaded = await Provider.create("r1", persistence, transport);
+    expect(reloaded.text).toBe("z");
   });
 });

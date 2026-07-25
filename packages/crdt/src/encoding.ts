@@ -356,3 +356,40 @@ export function decodeOpsStream(bytes: Uint8Array): CrdtOp[] {
   }
   return ops;
 }
+
+/**
+ * Like `decodeOpsStream`, but never throws on a trailing blob it cannot
+ * fully decode: it applies every *complete* blob and reports how many bytes
+ * that consumed, stopping cleanly at the first blob it can't finish.
+ *
+ * A reader of the relay's raw, unframed byte log (ARCH §5) needs exactly
+ * this. A `GET /doc/:id?from=N` can hand back bytes that end partway through
+ * a blob — a torn write, or bytes a buggy/malicious client appended — and a
+ * decoder that threw there would wedge the sync loop permanently on the same
+ * offset, throwing on every retry and never running the push/persist half
+ * that follows it. Instead the caller advances its read cursor by
+ * `bytesConsumed` (not the response length), so an incomplete or malformed
+ * tail is retried on the next read rather than skipped or made fatal.
+ *
+ * This recovers the genuinely-recoverable case (a cursor that lands
+ * mid-blob) and degrades honestly on the unrecoverable one (mid-log
+ * corruption in an unframed stream is unreachable past the bad byte no
+ * matter what — but the provider stays alive instead of dying on it).
+ */
+export function decodeOpsStreamPartial(bytes: Uint8Array): { ops: CrdtOp[]; bytesConsumed: number } {
+  const pos = { i: 0 };
+  const ops: CrdtOp[] = [];
+  let bytesConsumed = 0;
+  while (pos.i < bytes.length) {
+    try {
+      pushAll(ops, decodeOpsFrom(bytes, pos));
+    } catch {
+      // The blob starting at the last clean boundary doesn't fully fit in
+      // `bytes` (or is malformed). `bytesConsumed` still points at that
+      // boundary — stop and let the caller retry the remainder later.
+      break;
+    }
+    bytesConsumed = pos.i;
+  }
+  return { ops, bytesConsumed };
+}
