@@ -28,9 +28,11 @@ describe("Sequence (abstract base, Step 2)", () => {
     const op2 = seq.recordLocal("y");
     const op3 = seq.recordLocal("z");
 
-    expect(op1.id).toEqual({ replica: "A", counter: 0 });
-    expect(op2.id).toEqual({ replica: "A", counter: 1 });
-    expect(op3.id).toEqual({ replica: "A", counter: 2 });
+    // Identity counter is 0-based and dense; the Lamport clock is stamped
+    // before the counter advances, so it runs one ahead (see allocateId).
+    expect(op1.id).toEqual({ replica: "A", counter: 0, clock: 1 });
+    expect(op2.id).toEqual({ replica: "A", counter: 1, clock: 2 });
+    expect(op3.id).toEqual({ replica: "A", counter: 2, clock: 3 });
   });
 
   it("integrates local ops immediately, in order", () => {

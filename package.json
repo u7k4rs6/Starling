@@ -8,6 +8,7 @@
   "scripts": {
     "lint": "eslint .",
     "typecheck": "tsc -b --pretty && tsc -p packages/crdt/tsconfig.test.json --pretty && tsc -p packages/provider/tsconfig.test.json --pretty && tsc -p packages/demo/tsconfig.e2e.json --pretty",
+    "pretest": "tsc -b",
     "test": "vitest run",
     "gate:core-isolation": "node tools/gates/core-isolation.mjs",
     "gate:relay-ignorance": "node tools/gates/relay-ignorance.mjs",

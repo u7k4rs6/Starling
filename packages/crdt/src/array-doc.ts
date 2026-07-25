@@ -1,4 +1,4 @@
-import { compareElemIds, type ElemId, type ReplicaId } from "./elem-id.js";
+import { compareElemIds, toRef, type ElemId, type ElemRef, type ReplicaId } from "./elem-id.js";
 import { Sequence } from "./sequence.js";
 import type { CrdtOp, CrdtPayload } from "./ops.js";
 
@@ -46,13 +46,13 @@ export class ArrayDoc extends Sequence<CrdtPayload> {
    * before it, or null for "insert at the very start." O(n): this is the
    * exact mapping ARCH §2.5's treap makes O(log n) via a live-subtree
    * count, at Step 4b, not here. */
-  private originForVisibleIndex(visibleIndex: number): ElemId | null {
+  private originForVisibleIndex(visibleIndex: number): ElemRef | null {
     if (visibleIndex === 0) return null;
     let seen = 0;
     for (const e of this.elems) {
       if (e.deleted) continue;
       seen += 1;
-      if (seen === visibleIndex) return e.id;
+      if (seen === visibleIndex) return toRef(e.id);
     }
     throw new RangeError(`visible index ${visibleIndex} out of range`);
   }
@@ -68,10 +68,10 @@ export class ArrayDoc extends Sequence<CrdtPayload> {
    * marks. (Guaranteed convergent, not guaranteed to land strictly to the
    * tombstone's left under concurrent inserts nearby — that precision is
    * Fugue's job, Step 6, not this exhibit's.) */
-  insertBefore(tombstoneId: ElemId, char: string): CrdtOp {
+  insertBefore(tombstoneId: ElemRef, char: string): CrdtOp {
     const idx = this.indexOfId(tombstoneId);
     if (idx === -1) throw new RangeError("insertBefore: tombstone id not found");
-    const l = idx === 0 ? null : this.elems[idx - 1]!.id;
+    const l = idx === 0 ? null : toRef(this.elems[idx - 1]!.id);
     return this.recordLocalOp({ type: "insert", l, char }, l === null ? [] : [l]);
   }
 
@@ -80,14 +80,15 @@ export class ArrayDoc extends Sequence<CrdtPayload> {
     for (const e of this.elems) {
       if (e.deleted) continue;
       if (seen === visibleIndex) {
-        return this.recordLocalOp({ type: "delete", target: e.id }, [e.id]);
+        const target = toRef(e.id);
+        return this.recordLocalOp({ type: "delete", target }, [target]);
       }
       seen += 1;
     }
     throw new RangeError(`visible index ${visibleIndex} out of range`);
   }
 
-  private indexOfId(id: ElemId): number {
+  private indexOfId(id: ElemRef): number {
     return this.elems.findIndex((e) => e.id.replica === id.replica && e.id.counter === id.counter);
   }
 

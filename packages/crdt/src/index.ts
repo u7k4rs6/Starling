@@ -1,5 +1,5 @@
-export type { ElemId, ReplicaId } from "./elem-id.js";
-export { compareElemIds } from "./elem-id.js";
+export type { ElemId, ElemRef, ReplicaId } from "./elem-id.js";
+export { compareElemIds, toRef } from "./elem-id.js";
 export type { Op } from "./sequence.js";
 export { Sequence } from "./sequence.js";
 export { NaiveDoc } from "./naive-doc.js";

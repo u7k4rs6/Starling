@@ -71,8 +71,8 @@ describe("NaiveDoc (museum exhibit 1): apply() is not commutative", () => {
     const opB = replicaB.insertLocal(0, "B");
 
     // Identity is real now: distinct, non-reused ElemIds, not raw indices.
-    expect(opA.id).toEqual({ replica: "A", counter: 0 });
-    expect(opB.id).toEqual({ replica: "B", counter: 0 });
+    expect(opA.id).toEqual({ replica: "A", counter: 0, clock: 1 });
+    expect(opB.id).toEqual({ replica: "B", counter: 0, clock: 1 });
     expect(opA.id).not.toEqual(opB.id);
 
     // Idempotence is free, inherited from Sequence: re-receiving an

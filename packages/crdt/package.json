@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "A from-scratch Fugue/RGA CRDT for collaborative plain text: no runtime dependencies, a compact binary wire format, tombstone-based deletion, and id-based anchors for cursors that survive concurrent edits.",
   "type": "module",
+  "scripts": {
+    "prepack": "tsc -b"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

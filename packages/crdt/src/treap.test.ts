@@ -13,8 +13,10 @@ import {
   visibleIndexOfNode,
 } from "./treap.js";
 
+// Clock mirrors the counter here: these are a single synthetic replica's
+// sequential ops, which is exactly the shape allocateId produces.
 function id(counter: number): ElemId {
-  return { replica: "T", counter };
+  return { replica: "T", counter, clock: counter + 1 };
 }
 
 /** Reference in-order array, tombstones included, for cross-checking the

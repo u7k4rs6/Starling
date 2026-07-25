@@ -59,7 +59,7 @@ console.log("\n=== ARCH §3.1: 60,000 deletions, one contiguous run ===");
   const deleteOps = [];
   for (let i = 0; i < 60_000; i += 1) {
     const target = { replica: targetReplica, counter: i };
-    deleteOps.push({ id: { replica: deleteReplica, counter: i }, deps: [target], payload: { type: "delete", target } });
+    deleteOps.push({ id: { replica: deleteReplica, counter: i, clock: i + 1 }, deps: [target], payload: { type: "delete", target } });
   }
 
   const bytes = encodeOps(deleteOps);

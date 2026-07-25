@@ -1,12 +1,26 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { ElemId } from "./elem-id.js";
-import { runConvergencePropertyTests, runDocContractTests } from "./doc-contract.test-helpers.js";
+import {
+  runConvergencePropertyTests,
+  runDocContractTests,
+  runEditAfterReceivePropertyTests,
+  runIntentionPropertyTests,
+} from "./doc-contract.test-helpers.js";
 import { Doc } from "./fugue-doc.js";
 import type { CrdtOp } from "./ops.js";
 
 runDocContractTests("Doc (Fugue, the survivor)", (replica) => new Doc(replica));
 runConvergencePropertyTests("Doc (Fugue, the survivor)", (replica) => new Doc(replica));
+
+// F-6.1 / F-6.2. Both are asserted for `Doc` specifically because `Doc` is
+// the production class — the one the provider, the binding and the demo all
+// use — and it is the class that must hold intention, not merely converge.
+// The museum exhibits are deliberately not held to the intention contract:
+// see `naive-doc.test.ts` / `array-doc.test.ts` / `rga-doc.test.ts` for what
+// each one does and does not promise (PRD §4).
+runIntentionPropertyTests("Doc (Fugue, the survivor)", (replica) => new Doc(replica));
+runEditAfterReceivePropertyTests("Doc (Fugue, the survivor)", (replica) => new Doc(replica));
 
 describe("Doc fixes RgaDoc's bug (ARCH §2.3): concurrent backward typing stays contiguous", () => {
   it("two replicas each typing a word backward converge to a clean concatenation, not a jumble", () => {
@@ -308,7 +322,7 @@ describe("Doc: no stack overflow on a long single-sided chain (DECISIONS #0026)"
     const ops: CrdtOp[] = [];
     let prev: ElemId | null = null;
     for (let i = 0; i < n; i += 1) {
-      const id: ElemId = { replica, counter: i };
+      const id: ElemId = { replica, counter: i, clock: i + 1 };
       ops.push({ id, deps: prev === null ? [] : [prev], payload: { type: "insert", l: prev, char: "x", side: "R" } });
       prev = id;
     }

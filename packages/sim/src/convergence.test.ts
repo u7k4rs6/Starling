@@ -1,5 +1,5 @@
 import fc from "fast-check";
-import { RgaDoc, type CrdtOp } from "starling-crdt";
+import { Doc, RgaDoc, type CrdtOp } from "starling-crdt";
 import { describe, expect, it } from "vitest";
 import { Network } from "./network.js";
 import { createSeededRng } from "./rng.js";
@@ -18,6 +18,29 @@ function replicaName(i: number): string {
 }
 
 /**
+ * F-6.3: the adversarial network model (drops, duplicates, reordering,
+ * partitions) previously ran against `RgaDoc` only. `Doc` is the class the
+ * provider, the binding and the demo actually use, so the model built
+ * specifically to find delivery-order bugs was never pointed at the
+ * production code. Both now run the same properties.
+ *
+ * `RgaDoc` stays in the table rather than being replaced: it is exhibit 3
+ * and its convergence is still a real claim (PRD §4 — "if a change to the
+ * base breaks an exhibit, the exhibit was load-bearing").
+ */
+type SimDoc = {
+  readonly text: string;
+  insertLocal(visibleIndex: number, char: string): CrdtOp;
+  deleteLocal(visibleIndex: number): CrdtOp;
+  receive(op: CrdtOp): void;
+};
+
+const DOC_CLASSES: Array<{ label: string; make: (replica: string) => SimDoc }> = [
+  { label: "RgaDoc (exhibit 3)", make: (replica) => new RgaDoc(replica) },
+  { label: "Doc (Fugue, production)", make: (replica) => new Doc(replica) },
+];
+
+/**
  * S3: generate ops from independently-evolving replica state (real
  * concurrency, same generation strategy as the crdt package's own S1/S2
  * tests), broadcast each to every other replica over the `Network`, then
@@ -27,12 +50,13 @@ function replicaName(i: number): string {
  * pending), duplication is explicit.
  */
 function runAdversarialScenario(
+  makeDoc: (replica: string) => SimDoc,
   replicaCount: number,
   opSpecs: OpSpec[],
   networkSeed: number,
   duplicateRounds: number
 ): string[] {
-  const replicas = Array.from({ length: replicaCount }, (_, i) => new RgaDoc(replicaName(i)));
+  const replicas = Array.from({ length: replicaCount }, (_, i) => makeDoc(replicaName(i)));
   const net = new Network<CrdtOp>(createSeededRng(networkSeed));
 
   opSpecs.forEach((spec) => {
@@ -58,7 +82,8 @@ function runAdversarialScenario(
   return replicas.map((r) => r.text);
 }
 
-describe("S3: convergence holds under arbitrary delivery order", () => {
+for (const { label, make } of DOC_CLASSES) {
+describe(`S3 [${label}]: convergence holds under arbitrary delivery order`, () => {
   it("adversarial delivery (RNG-reordered, some envelopes duplicated) still converges", () => {
     fc.assert(
       fc.property(
@@ -66,7 +91,7 @@ describe("S3: convergence holds under arbitrary delivery order", () => {
         fc.integer({ min: 0, max: 1_000_000 }),
         fc.integer({ min: 0, max: 5 }),
         (opSpecs, networkSeed, duplicateRounds) => {
-          const texts = runAdversarialScenario(3, opSpecs, networkSeed, duplicateRounds);
+          const texts = runAdversarialScenario(make, 3, opSpecs, networkSeed, duplicateRounds);
           expect(new Set(texts).size).toBe(1);
         }
       ),
@@ -86,17 +111,17 @@ describe("S3: convergence holds under arbitrary delivery order", () => {
       { replicaIndex: 0, kind: "insert", rawIndex: 1, char: "i" },
       { replicaIndex: 1, kind: "delete", rawIndex: 0, char: "x" },
     ];
-    const texts = runAdversarialScenario(3, opSpecs, 424242, 3);
+    const texts = runAdversarialScenario(make, 3, opSpecs, 424242, 3);
     expect(new Set(texts).size).toBe(1);
   });
 });
 
-describe("S4: convergence holds under partition and rejoin", () => {
+describe(`S4 [${label}]: convergence holds under partition and rejoin`, () => {
   it("partitioned groups diverge from each other while healthy within their own group; healing converges everyone", () => {
     const net = new Network<CrdtOp>(createSeededRng(1));
-    const a = new RgaDoc("A");
-    const b = new RgaDoc("B");
-    const c = new RgaDoc("C");
+    const a = make("A");
+    const b = make("B");
+    const c = make("C");
     const replicas = new Map([
       ["A", a],
       ["B", b],
@@ -139,7 +164,7 @@ describe("S4: convergence holds under partition and rejoin", () => {
         fc.integer({ min: 0, max: 1_000_000 }),
         (groupOneOps, groupTwoOps, seed) => {
           const net = new Network<CrdtOp>(createSeededRng(seed));
-          const replicas = [new RgaDoc(replicaName(0)), new RgaDoc(replicaName(1))];
+          const replicas = [make(replicaName(0)), make(replicaName(1))];
           net.partition([[replicaName(0)], [replicaName(1)]]);
 
           const apply = (replicaIndex: number, spec: OpSpec) => {
@@ -175,3 +200,4 @@ describe("S4: convergence holds under partition and rejoin", () => {
     );
   });
 });
+}

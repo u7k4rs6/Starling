@@ -1,4 +1,4 @@
-import { compareElemIds, type ElemId, type ReplicaId } from "./elem-id.js";
+import { compareElemIds, toRef, type ElemId, type ElemRef, type ReplicaId } from "./elem-id.js";
 import { Sequence } from "./sequence.js";
 import type { CrdtOp, CrdtPayload } from "./ops.js";
 
@@ -164,7 +164,7 @@ export type AnchorSide = "before" | "after";
  * live content yet, so a boundary anchor on an empty doc always resolves
  * to 0 rather than pointing at anything.
  */
-export type Anchor = { id: ElemId | null; side: AnchorSide };
+export type Anchor = { id: ElemRef | null; side: AnchorSide };
 
 /**
  * Count of live (non-tombstoned) nodes strictly before `target` in the
@@ -230,11 +230,11 @@ export class Doc extends Sequence<CrdtPayload> {
     return parts.join("");
   }
 
-  private static key(id: ElemId): string {
+  private static key(id: ElemRef): string {
     return `${id.replica}:${id.counter}`;
   }
 
-  private nodeForId(id: ElemId): FugueNode {
+  private nodeForId(id: ElemRef): FugueNode {
     const node = this.byId.get(Doc.key(id));
     if (!node) throw new RangeError("Doc: id not found");
     return node;
@@ -247,14 +247,14 @@ export class Doc extends Sequence<CrdtPayload> {
    * repeated "insert at 0" (backward typing) into a left-leaning chain
    * per replica, instead of a flat sibling group tie-broken by id against
    * every other replica's chain at once. */
-  private originForVisibleIndex(visibleIndex: number): { l: ElemId | null; side: Side } {
+  private originForVisibleIndex(visibleIndex: number): { l: ElemRef | null; side: Side } {
     if (visibleIndex === 0) {
       const following = nodeAtVisibleIndex(this.rootChildren, 0);
-      return following === null ? { l: null, side: "R" } : { l: following.id, side: "L" };
+      return following === null ? { l: null, side: "R" } : { l: toRef(following.id), side: "L" };
     }
     const preceding = nodeAtVisibleIndex(this.rootChildren, visibleIndex - 1);
     if (preceding === null) throw new RangeError(`visible index ${visibleIndex} out of range`);
-    return { l: preceding.id, side: "R" };
+    return { l: toRef(preceding.id), side: "R" };
   }
 
   insertLocal(visibleIndex: number, char: string): CrdtOp {
@@ -271,15 +271,17 @@ export class Doc extends Sequence<CrdtPayload> {
    * "immediately after the tombstone" and "immediately before it" are the
    * same visible position — what matters is landing adjacent to the
    * anchor, not which literal side. */
-  insertBefore(tombstoneId: ElemId, char: string): CrdtOp {
+  insertBefore(tombstoneId: ElemRef, char: string): CrdtOp {
     this.nodeForId(tombstoneId); // throws if unresolvable
-    return this.recordLocalOp({ type: "insert", l: tombstoneId, side: "R", char }, [tombstoneId]);
+    const ref = toRef(tombstoneId);
+    return this.recordLocalOp({ type: "insert", l: ref, side: "R", char }, [ref]);
   }
 
   deleteLocal(visibleIndex: number): CrdtOp {
     const node = nodeAtVisibleIndex(this.rootChildren, visibleIndex);
     if (!node) throw new RangeError(`visible index ${visibleIndex} out of range`);
-    return this.recordLocalOp({ type: "delete", target: node.id }, [node.id]);
+    const target = toRef(node.id);
+    return this.recordLocalOp({ type: "delete", target }, [target]);
   }
 
   /** ARCH §8: undo of "insert x" is "delete the element with *this id*" —
@@ -291,9 +293,10 @@ export class Doc extends Sequence<CrdtPayload> {
    * it concurrently with a pending local undo) still records a delete op
    * rather than special-casing it away — "deleted" is already a monotone
    * fact once true, so this is redundant, not wrong. */
-  deleteById(id: ElemId): CrdtOp {
+  deleteById(id: ElemRef): CrdtOp {
     this.nodeForId(id); // throws if unresolvable — same contract as insertBefore
-    return this.recordLocalOp({ type: "delete", target: id }, [id]);
+    const target = toRef(id);
+    return this.recordLocalOp({ type: "delete", target }, [target]);
   }
 
   /** The character a (possibly tombstoned) id was inserted with — needed
@@ -301,7 +304,7 @@ export class Doc extends Sequence<CrdtPayload> {
    * character with the same value next to the tombstone, and the
    * tombstone itself (never actually removed from the tree) is the only
    * place that original value still lives. */
-  charForId(id: ElemId): string {
+  charForId(id: ElemRef): string {
     return this.nodeForId(id).char;
   }
 
@@ -323,10 +326,10 @@ export class Doc extends Sequence<CrdtPayload> {
       throw new RangeError(`visible index ${visibleIndex} out of range`);
     }
     const atIndex = nodeAtVisibleIndex(this.rootChildren, visibleIndex);
-    if (atIndex !== null) return { id: atIndex.id, side: "before" };
+    if (atIndex !== null) return { id: toRef(atIndex.id), side: "before" };
     if (length === 0) return { id: null, side: "before" };
     const last = nodeAtVisibleIndex(this.rootChildren, length - 1)!;
-    return { id: last.id, side: "after" };
+    return { id: toRef(last.id), side: "after" };
   }
 
   /** The anchor's *current* visible index — recomputed from the tree's

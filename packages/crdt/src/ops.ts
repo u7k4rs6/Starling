@@ -1,4 +1,4 @@
-import type { ElemId } from "./elem-id.js";
+import type { ElemRef } from "./elem-id.js";
 import type { Op } from "./sequence.js";
 
 /**
@@ -13,7 +13,14 @@ import type { Op } from "./sequence.js";
  * merge rule has no concept of side, only origin — so it's optional and
  * those two classes' insertLocal never sets it.
  */
-export type InsertPayload = { type: "insert"; l: ElemId | null; char: string; side?: "L" | "R" };
-export type DeletePayload = { type: "delete"; target: ElemId };
+/**
+ * `l` and `target` are `ElemRef`, not `ElemId`: both are resolved purely by
+ * lookup (`nodeForId`), never compared for order, so neither needs — or
+ * carries — a Lamport clock. Only an op's own `id` does. That is what keeps
+ * the wire cost of F-1's fix at one varint per op, and it means a decoded
+ * reference can never carry a fabricated ordering value (see `elem-id.ts`).
+ */
+export type InsertPayload = { type: "insert"; l: ElemRef | null; char: string; side?: "L" | "R" };
+export type DeletePayload = { type: "delete"; target: ElemRef };
 export type CrdtPayload = InsertPayload | DeletePayload;
 export type CrdtOp = Op<CrdtPayload>;

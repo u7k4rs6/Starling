@@ -1,4 +1,4 @@
-import { compareElemIds, type ElemId, type ReplicaId } from "./elem-id.js";
+import { compareElemIds, toRef, type ElemRef, type ReplicaId } from "./elem-id.js";
 import { Sequence } from "./sequence.js";
 import type { CrdtOp, CrdtPayload } from "./ops.js";
 import {
@@ -37,11 +37,11 @@ export class RgaDoc extends Sequence<CrdtPayload> {
     return inOrderChars(this.root, true);
   }
 
-  private static key(id: ElemId): string {
+  private static key(id: ElemRef): string {
     return `${id.replica}:${id.counter}`;
   }
 
-  private nodeForId(id: ElemId): TreapNode {
+  private nodeForId(id: ElemRef): TreapNode {
     const node = this.byId.get(RgaDoc.key(id));
     if (!node) throw new RangeError("RgaDoc: id not found");
     return node;
@@ -50,11 +50,11 @@ export class RgaDoc extends Sequence<CrdtPayload> {
   /** Visible index → the id of the live element immediately before it, or
    * null for "insert at the very start." O(log n) via the treap's live
    * subtree counts (ARCH §2.5) — the mapping ArrayDoc does in O(n). */
-  private originForVisibleIndex(visibleIndex: number): ElemId | null {
+  private originForVisibleIndex(visibleIndex: number): ElemRef | null {
     if (visibleIndex === 0) return null;
     const node = nodeAtVisibleIndex(this.root, visibleIndex - 1);
     if (!node) throw new RangeError(`visible index ${visibleIndex} out of range`);
-    return node.id;
+    return toRef(node.id);
   }
 
   insertLocal(visibleIndex: number, char: string): CrdtOp {
@@ -64,17 +64,19 @@ export class RgaDoc extends Sequence<CrdtPayload> {
 
   /** ARCH §2.4: the inverse of del(id) is insertBefore(tombstoneId, char),
    * not a revive — same semantics as ArrayDoc's, O(log n) here. */
-  insertBefore(tombstoneId: ElemId, char: string): CrdtOp {
+  insertBefore(tombstoneId: ElemRef, char: string): CrdtOp {
     const node = this.nodeForId(tombstoneId);
     const idx = indexOfNode(node);
-    const l = idx === 0 ? null : nodeAtInternalIndex(this.root, idx - 1)?.id ?? null;
+    const prev = idx === 0 ? null : nodeAtInternalIndex(this.root, idx - 1) ?? null;
+    const l = prev === null ? null : toRef(prev.id);
     return this.recordLocalOp({ type: "insert", l, char }, l === null ? [] : [l]);
   }
 
   deleteLocal(visibleIndex: number): CrdtOp {
     const node = nodeAtVisibleIndex(this.root, visibleIndex);
     if (!node) throw new RangeError(`visible index ${visibleIndex} out of range`);
-    return this.recordLocalOp({ type: "delete", target: node.id }, [node.id]);
+    const target = toRef(node.id);
+    return this.recordLocalOp({ type: "delete", target }, [target]);
   }
 
   protected integrate(op: CrdtOp): void {

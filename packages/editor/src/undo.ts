@@ -1,6 +1,8 @@
-import type { CrdtOp, Doc, ElemId } from "starling-crdt";
+import type { CrdtOp, Doc, ElemId, ElemRef } from "starling-crdt";
 
-type UndoEntry = { kind: "insert"; id: ElemId } | { kind: "delete"; tombstoneId: ElemId; char: string };
+// `id` is an op's own ElemId (what deleteById needs); `tombstoneId` is a
+// reference to someone's element, so ElemRef — the split from F-1.
+type UndoEntry = { kind: "insert"; id: ElemId } | { kind: "delete"; tombstoneId: ElemRef; char: string };
 
 /**
  * ARCH §8 / FRONTEND §1.4: "Undo transforms nothing." No OT-style

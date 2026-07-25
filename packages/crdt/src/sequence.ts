@@ -1,4 +1,4 @@
-import type { ElemId, ReplicaId } from "./elem-id.js";
+import type { ElemId, ElemRef, ReplicaId } from "./elem-id.js";
 
 /**
  * Every op is an envelope: an id the base allocates, the causal
@@ -18,7 +18,9 @@ import type { ElemId, ReplicaId } from "./elem-id.js";
  */
 export type Op<Payload> = {
   id: ElemId;
-  deps: ElemId[];
+  /** Identity references only: a dep is *looked up* in `integratedIds`,
+   * never compared for order, so `ElemRef` is the whole requirement. */
+  deps: ElemRef[];
   payload: Payload;
 };
 
@@ -40,6 +42,15 @@ export type StateVector = Map<ReplicaId, number>;
  */
 export abstract class Sequence<Payload> {
   private counter = 0;
+  /**
+   * Lamport clock, the *ordering* half of an id — strictly separate from
+   * `counter`, which is the *identity* half. Advances on every op this
+   * replica sees (`observeClock`, from `receive`) as well as every op it
+   * creates, so an op created after seeing element B always outranks B.
+   * That is the property `compareElemIds` needs and the bare identity
+   * counter never had (F-1).
+   */
+  private lamport = 0;
   private readonly accepted = new Map<ReplicaId, Set<number>>();
   private readonly integratedIds = new Map<ReplicaId, Set<number>>();
   private readonly pending: Op<Payload>[] = [];
@@ -50,13 +61,18 @@ export abstract class Sequence<Payload> {
 
   protected constructor(protected readonly replica: ReplicaId) {}
 
+  /** Identity advances after stamping, the clock before it — so a
+   * replica's own op always has `clock > counter`, and two ops from one
+   * replica never share a clock (what makes `compareElemIds`'s final
+   * counter tiebreak unreachable). */
   protected allocateId(): ElemId {
-    const id: ElemId = { replica: this.replica, counter: this.counter };
+    this.lamport += 1;
+    const id: ElemId = { replica: this.replica, counter: this.counter, clock: this.lamport };
     this.counter += 1;
     return id;
   }
 
-  protected recordLocalOp(payload: Payload, deps: ElemId[] = []): Op<Payload> {
+  protected recordLocalOp(payload: Payload, deps: ElemRef[] = []): Op<Payload> {
     const op: Op<Payload> = { id: this.allocateId(), deps, payload };
     this.receive(op);
     return op;
@@ -72,12 +88,53 @@ export abstract class Sequence<Payload> {
   receive(op: Op<Payload>): void {
     if (idSetHas(this.accepted, op.id)) return;
     idSetAdd(this.accepted, op.id);
+    this.reserveOwnId(op.id);
+    this.observeClock(op.id);
 
     if (this.dependenciesSatisfied(op)) {
       this.integrateAndDrain(op);
     } else {
       this.pending.push(op);
     }
+  }
+
+  /**
+   * Never reissue an id this replica has already used — including ids it
+   * only ever learns about by *receiving its own ops back*. That is the
+   * reload path: `Provider.create` (ARCH §6, "Reload replays it") replays a
+   * persisted op log into a fresh instance carrying the SAME replica id, so
+   * every one of this replica's prior ops arrives through `receive`, never
+   * through `allocateId`. Without this the counter restarts at 0 and the
+   * next local edit is allocated an id the log already contains; since
+   * idempotence is keyed on id (see `receive` above), that edit is silently
+   * dropped locally, and peers handed the same op set converge to different
+   * text depending on delivery order (F-2).
+   *
+   * Applied at *acceptance* rather than at integration, so an own-op still
+   * buffered on an unsatisfied dependency reserves its counter too — a
+   * pending op's id is just as spent as an integrated one's.
+   *
+   * Identity only. `counter` feeds `allocateId` and nothing else: this does
+   * not touch element ordering (`compareElemIds`) or state-vector semantics
+   * (`getStateVector` derives from `integratedIds`, not from `counter`).
+   */
+  private reserveOwnId(id: ElemId): void {
+    if (id.replica !== this.replica) return;
+    if (id.counter >= this.counter) this.counter = id.counter + 1;
+  }
+
+  /**
+   * The Lamport half of the same idea, for *every* op rather than only this
+   * replica's own: having seen a clock, this replica's next op must exceed
+   * it, so its id sorts above everything it has observed. That is what makes
+   * `compareElemIds`'s order consistent with causality (F-1).
+   *
+   * Applied at acceptance, alongside `reserveOwnId` and for the same reason:
+   * an op buffered on an unsatisfied dependency has still been *seen*, and a
+   * local edit made before that dependency arrives must still outrank it.
+   */
+  private observeClock(id: ElemId): void {
+    if (id.clock > this.lamport) this.lamport = id.clock;
   }
 
   private dependenciesSatisfied(op: Op<Payload>): boolean {
@@ -128,11 +185,11 @@ export abstract class Sequence<Payload> {
   protected abstract integrate(op: Op<Payload>): void;
 }
 
-function idSetHas(map: Map<ReplicaId, Set<number>>, id: ElemId): boolean {
+function idSetHas(map: Map<ReplicaId, Set<number>>, id: ElemRef): boolean {
   return map.get(id.replica)?.has(id.counter) ?? false;
 }
 
-function idSetAdd(map: Map<ReplicaId, Set<number>>, id: ElemId): void {
+function idSetAdd(map: Map<ReplicaId, Set<number>>, id: ElemRef): void {
   let set = map.get(id.replica);
   if (!set) {
     set = new Set();

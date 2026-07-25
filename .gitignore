@@ -1,9 +1,22 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 *.tsbuildinfo
+
+# Test / tooling artifacts
 coverage/
+.vitest/
+packages/demo/playwright-report/
+packages/demo/test-results/
+
+# Editor / OS
 .DS_Store
-test-results/
-playwright-report/
-blob-report/
-playwright/.cache/
+*.log
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+.dev.vars

@@ -1,6 +1,9 @@
 packages:
   - "packages/*"
 
+allowBuilds:
+  esbuild: set this to true or false
+
 # docs/DECISIONS.md #0005. pnpm 10 already refuses to run dependency
 # postinstall/preinstall/install scripts unless allow-listed here — that
 # default is what SECURITY §3 means by "no install scripts." Asserting it

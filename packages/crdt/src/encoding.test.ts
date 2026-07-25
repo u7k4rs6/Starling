@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import type { ElemId } from "./elem-id.js";
+import { toRef, type ElemId, type ElemRef } from "./elem-id.js";
 import {
   decodeOps,
   decodeOpsStream,
@@ -92,12 +92,16 @@ describe("manual UTF-8 (no TextEncoder/TextDecoder — verified unavailable unde
   });
 });
 
-function makeInsert(id: ElemId, l: ElemId | null, char: string, side?: "L" | "R"): CrdtOp {
+// Normalizes `l` the same way the doc classes do, so a hand-built op has
+// the identical shape to one that has been through encode/decode.
+function makeInsert(id: ElemId, origin: ElemRef | null, char: string, side?: "L" | "R"): CrdtOp {
+  const l = origin === null ? null : toRef(origin);
   const payload: CrdtPayload = side === undefined ? { type: "insert", l, char } : { type: "insert", l, char, side };
   return { id, deps: l === null ? [] : [l], payload };
 }
 
-function makeDelete(id: ElemId, target: ElemId): CrdtOp {
+function makeDelete(id: ElemId, targetId: ElemRef): CrdtOp {
+  const target = toRef(targetId);
   return { id, deps: [target], payload: { type: "delete", target } };
 }
 
@@ -118,12 +122,12 @@ function countOccurrences(haystack: Uint8Array, needle: Uint8Array): number {
 
 describe("encodeOps / decodeOps round-trip", () => {
   it("round-trips a small hand-built op set exactly, deps included", () => {
-    const a0: ElemId = { replica: "A", counter: 0 };
-    const a1: ElemId = { replica: "A", counter: 1 };
+    const a0: ElemId = { replica: "A", counter: 0, clock: 1 };
+    const a1: ElemId = { replica: "A", counter: 1, clock: 2 };
     const ops: CrdtOp[] = [
       makeInsert(a0, null, "h", "R"),
       makeInsert(a1, a0, "i", "R"),
-      makeDelete({ replica: "A", counter: 2 }, a0),
+      makeDelete({ replica: "A", counter: 2, clock: 3 }, a0),
     ];
     const decoded = decodeOps(encodeOps(ops));
     expect(decoded).toEqual(ops);
@@ -140,7 +144,7 @@ describe("encodeOps / decodeOps round-trip", () => {
     const ops: CrdtOp[] = [];
     let prev: ElemId | null = null;
     for (let i = 0; i < 20; i += 1) {
-      const id: ElemId = { replica: longReplicaId, counter: i };
+      const id: ElemId = { replica: longReplicaId, counter: i, clock: i + 1 };
       ops.push(makeInsert(id, prev, "x"));
       prev = id;
     }
@@ -168,10 +172,14 @@ describe("encodeOps / decodeOps round-trip", () => {
           const countersByReplica = new Map<string, number>();
           const allIds: ElemId[] = [];
           const ops: CrdtOp[] = [];
+          // Clock is globally monotonic across the sequence: these ops are
+          // generated in causal order, which is what a real replica emits.
+          let clock = 0;
           for (const spec of specs) {
             const counter = countersByReplica.get(spec.replica) ?? 0;
             countersByReplica.set(spec.replica, counter + 1);
-            const id: ElemId = { replica: spec.replica, counter };
+            clock += 1;
+            const id: ElemId = { replica: spec.replica, counter, clock };
             const origin = spec.hasOrigin && allIds.length > 0 ? allIds[allIds.length - 1]! : null;
             ops.push(makeInsert(id, origin, spec.char, spec.side));
             allIds.push(id);
@@ -195,7 +203,7 @@ describe("encodeOps / decodeOps round-trip", () => {
           const insertedIds: ElemId[] = [];
           for (const kind of kinds) {
             if (kind === "insert" || insertedIds.length === 0) {
-              const id: ElemId = { replica: "A", counter };
+              const id: ElemId = { replica: "A", counter, clock: counter + 1 };
               counter += 1;
               ops.push(makeInsert(id, lastInserted, "x"));
               lastInserted = id;
@@ -205,7 +213,7 @@ describe("encodeOps / decodeOps round-trip", () => {
               const runLength = Math.min(3, insertedIds.length);
               const startIdx = insertedIds.length - runLength;
               for (let k = 0; k < runLength; k += 1) {
-                const delId: ElemId = { replica: "A", counter };
+                const delId: ElemId = { replica: "A", counter, clock: counter + 1 };
                 counter += 1;
                 ops.push(makeDelete(delId, insertedIds[startIdx + k]!));
               }
@@ -227,7 +235,7 @@ describe("decodeOpsStream: concatenated blobs (ARCH §5/§6 — the relay's raw 
   });
 
   it("a single blob decodes the same via decodeOpsStream as via decodeOps", () => {
-    const a0: ElemId = { replica: "A", counter: 0 };
+    const a0: ElemId = { replica: "A", counter: 0, clock: 1 };
     const ops: CrdtOp[] = [makeInsert(a0, null, "h", "R")];
     const bytes = encodeOps(ops);
     expect(decodeOpsStream(bytes)).toEqual(decodeOps(bytes));
@@ -256,7 +264,7 @@ describe("decodeOpsStream: concatenated blobs (ARCH §5/§6 — the relay's raw 
             for (const spec of batch) {
               const counter = countersByReplica.get(spec.replica) ?? 0;
               countersByReplica.set(spec.replica, counter + 1);
-              const id: ElemId = { replica: spec.replica, counter };
+              const id: ElemId = { replica: spec.replica, counter, clock: counter + 1 };
               batchOps.push(makeInsert(id, null, spec.char));
             }
             blobs.push(encodeOps(batchOps));
@@ -288,10 +296,12 @@ describe("ARCH §3.1 target: 60,000 deletions encode in 29 bytes", () => {
     // targets, small starting counters) scenario.
     const targetReplica = "T";
     const deleteReplica = "D";
-    const targets: ElemId[] = [];
+    const targets: ElemRef[] = [];
     for (let i = 0; i < 60_000; i += 1) targets.push({ replica: targetReplica, counter: i });
+    // Consecutive clocks, as one uninterrupted local delete burst produces —
+    // the eligibility condition that keeps this a single RLE run.
     const ops: CrdtOp[] = targets.map((target, i) =>
-      makeDelete({ replica: deleteReplica, counter: i }, target)
+      makeDelete({ replica: deleteReplica, counter: i, clock: i + 1 }, target)
     );
 
     const bytes = encodeOps(ops);

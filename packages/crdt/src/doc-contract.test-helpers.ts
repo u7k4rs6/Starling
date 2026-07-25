@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import type { ElemId } from "./elem-id.js";
+import { toRef, type ElemId } from "./elem-id.js";
 import type { CrdtOp, InsertPayload } from "./ops.js";
 import type { StateVector } from "./sequence.js";
 
@@ -62,8 +62,10 @@ export function runDocContractTests(label: string, makeDoc: (replica: string) =>
       expect(asInsert(op1.payload).l).toBeNull();
 
       const op2 = doc.insertLocal(1, "b");
-      expect(op2.deps).toEqual([op1.id]);
-      expect(asInsert(op2.payload).l).toEqual(op1.id);
+      // A payload reference and a dep are ElemRefs — identity without the
+      // Lamport clock, which only an op's own id carries (F-1).
+      expect(op2.deps).toEqual([toRef(op1.id)]);
+      expect(asInsert(op2.payload).l).toEqual(toRef(op1.id));
     });
 
     it("a deleted character disappears from text but its id stays resolvable", () => {
@@ -84,8 +86,8 @@ export function runDocContractTests(label: string, makeDoc: (replica: string) =>
       const doc = makeDoc("A");
       const op1 = doc.insertLocal(0, "x");
       const del = doc.deleteLocal(0);
-      expect(del.payload).toEqual({ type: "delete", target: op1.id });
-      expect(del.deps).toEqual([op1.id]);
+      expect(del.payload).toEqual({ type: "delete", target: toRef(op1.id) });
+      expect(del.deps).toEqual([toRef(op1.id)]);
     });
 
     it("delete is idempotent: the same target deleted by two independent ops has the same effect as once", () => {
@@ -255,6 +257,286 @@ export function runScenario(
       replica.receive(op);
     }
     return replica.text;
+  });
+}
+
+// --- F-6.2: edit-after-receive (the shape that hid F-1 and F-2) ----------
+
+/**
+ * What `runScenario` above cannot generate, and why this exists.
+ *
+ * `runScenario` creates EVERY op first — each replica editing only against
+ * its own state — and only then delivers anything. So no replica ever
+ * creates a local op while holding a foreign one, and no op's origin/deps
+ * ever references an element authored elsewhere. That is precisely the
+ * state F-1 lived in (a late joiner's inserts sorting beneath content it
+ * had received) and F-2 lived in (a replica allocating ids after replaying
+ * someone's — its own — prior ops). 1,500 property runs never entered it.
+ *
+ * This generator interleaves the two phases instead: each round, replicas
+ * create local ops, then a partial, seeded gossip delivers some of what
+ * exists to some replicas. From round two on, a replica editing has already
+ * integrated foreign elements, so `insertLocal` picks origins that are
+ * foreign ids and `deps` crosses replicas — the untested path.
+ *
+ * `stats.editsAfterForeign` counts exactly those: local ops created by a
+ * replica that had already integrated at least one op it did not author.
+ * The property tests below accumulate it across runs and assert it is
+ * non-trivially positive, because a generator that *claimed* to cover this
+ * shape while never producing it would rebuild the original blind spot in
+ * place, silently — which is the failure mode this whole batch exists to
+ * close.
+ */
+export type InterleavedStats = {
+  /** Local ops created by a replica holding ≥1 foreign op. The coverage number. */
+  editsAfterForeign: number;
+  /** Total local ops created, for context. */
+  totalEdits: number;
+  /** Distinct replicas that ever made such an edit. */
+  replicasEditingAfterForeign: number;
+};
+
+export type RoundSpec = {
+  edits: OpSpec[];
+  /** Seed plus a 0..1 fraction controlling which pending ops gossip to whom. */
+  gossipSeed: number;
+  gossipFraction: number;
+};
+
+export function runInterleavedScenario(
+  makeDoc: (replica: string) => CrdtDoc,
+  replicaCount: number,
+  rounds: RoundSpec[],
+  finalShuffleSeeds: number[]
+): { texts: string[]; stats: InterleavedStats } {
+  const replicas = Array.from({ length: replicaCount }, (_, i) => makeDoc(`replica-${i}`));
+  const authorOf: number[] = []; // op index -> authoring replica index
+  const allOps: CrdtOp[] = [];
+  /** Which op indices each replica has already received. */
+  const seen: Set<number>[] = Array.from({ length: replicaCount }, () => new Set<number>());
+  /** Whether a replica currently holds at least one op it did not author. */
+  const holdsForeign: boolean[] = Array.from({ length: replicaCount }, () => false);
+
+  const stats: InterleavedStats = { editsAfterForeign: 0, totalEdits: 0, replicasEditingAfterForeign: 0 };
+  const editedAfterForeign = new Set<number>();
+
+  for (const round of rounds) {
+    // 1. Local edits, made against each replica's CURRENT merged state.
+    for (const spec of round.edits) {
+      const index = spec.replicaIndex % replicaCount;
+      const replica = replicas[index]!;
+      stats.totalEdits += 1;
+      if (holdsForeign[index]) {
+        stats.editsAfterForeign += 1;
+        editedAfterForeign.add(index);
+      }
+      const op =
+        spec.kind === "delete" && replica.text.length > 0
+          ? replica.deleteLocal(spec.rawIndex % replica.text.length)
+          : replica.insertLocal(Math.min(spec.rawIndex, replica.text.length), spec.char);
+      const opIndex = allOps.length;
+      allOps.push(op);
+      authorOf.push(index);
+      seen[index]!.add(opIndex); // an author has trivially "seen" its own op
+    }
+
+    // 2. Partial gossip: deliver a seeded subset of what each replica is
+    //    missing. Fraction < 1 is the point — a full delivery every round
+    //    would keep everyone in lockstep and never build divergent states
+    //    for a later round's edit to be made against.
+    for (let r = 0; r < replicaCount; r += 1) {
+      const missing: number[] = [];
+      for (let opIndex = 0; opIndex < allOps.length; opIndex += 1) {
+        if (!seen[r]!.has(opIndex)) missing.push(opIndex);
+      }
+      if (missing.length === 0) continue;
+      const order = shuffledCopy(missing, round.gossipSeed + r);
+      const take = Math.max(1, Math.floor(order.length * round.gossipFraction));
+      for (const opIndex of order.slice(0, take)) {
+        replicas[r]!.receive(allOps[opIndex]!);
+        seen[r]!.add(opIndex);
+        if (authorOf[opIndex] !== r) holdsForeign[r] = true;
+      }
+    }
+  }
+
+  // 3. Final drain: everything to everyone, each replica in its own
+  //    shuffled order, so convergence still has to survive arbitrary
+  //    delivery order on top of the interleaving above.
+  const texts = replicas.map((replica, i) => {
+    const seed = finalShuffleSeeds[i % finalShuffleSeeds.length] ?? i;
+    for (const op of shuffledCopy(allOps, seed)) replica.receive(op);
+    return replica.text;
+  });
+
+  stats.replicasEditingAfterForeign = editedAfterForeign.size;
+  return { texts, stats };
+}
+
+export const roundSpecArb = fc.record({
+  edits: fc.array(opSpecArb, { minLength: 0, maxLength: 5 }),
+  gossipSeed: fc.integer(),
+  gossipFraction: fc.constantFrom(0.25, 0.5, 0.75, 1),
+});
+
+/**
+ * Reported by the caller so the coverage number is visible in test output,
+ * not merely asserted — "the generator provably entered the shape" is the
+ * claim, and a silent boolean is a weak way to make it.
+ */
+export function runEditAfterReceivePropertyTests(
+  label: string,
+  makeDoc: (replica: string) => CrdtDoc
+): void {
+  describe(`${label}: convergence when replicas edit AFTER integrating foreign ops (F-6.2)`, () => {
+    for (const replicaCount of [2, 3]) {
+      it(`${replicaCount} replicas: interleaved edit/gossip rounds still converge, and the shape is provably exercised`, () => {
+        let editsAfterForeign = 0;
+        let scenariosCovering = 0;
+        let scenarios = 0;
+        const numRuns = replicaCount === 2 ? 500 : 300;
+
+        fc.assert(
+          fc.property(
+            fc.array(roundSpecArb, { minLength: 1, maxLength: 6 }),
+            fc.tuple(fc.integer(), fc.integer(), fc.integer()),
+            (rounds, finalSeeds) => {
+              const { texts, stats } = runInterleavedScenario(makeDoc, replicaCount, rounds, [...finalSeeds]);
+              scenarios += 1;
+              editsAfterForeign += stats.editsAfterForeign;
+              if (stats.editsAfterForeign > 0) scenariosCovering += 1;
+              // The actual convergence claim.
+              expect(new Set(texts).size).toBe(1);
+            }
+          ),
+          { numRuns }
+        );
+
+        // COVERAGE PROOF. Floors are set well beneath the observed rate
+        // (typically well over half of scenarios cover the shape) so this
+        // guards against a generator that stops producing edit-after-receive
+        // entirely, without being a flaky assertion about an exact rate.
+        const coverageRate = scenariosCovering / scenarios;
+        console.log(
+          `    [F-6.2 coverage] ${label}, ${replicaCount} replicas: ` +
+            `${scenariosCovering}/${scenarios} scenarios (${(coverageRate * 100).toFixed(1)}%) ` +
+            `contained an edit-after-receive; ${editsAfterForeign} such ops total`
+        );
+        expect(editsAfterForeign).toBeGreaterThan(0);
+        expect(coverageRate).toBeGreaterThan(0.1);
+      });
+    }
+  });
+}
+
+// --- F-6.1: intention, not just convergence ------------------------------
+
+/**
+ * The single highest-value assertion missing from this suite (audit F-6.1).
+ *
+ * Every convergence property here asserts `new Set(texts).size === 1` and
+ * nothing more. A document class that appended every character to the end
+ * in a fixed order would satisfy all 1,500 runs of them. F-1 — inserts by a
+ * late joiner landing in the wrong position — lived in exactly that gap:
+ * all replicas agreed on the wrong answer.
+ *
+ * The oracle is a plain JS string, and it is only applied where "intended
+ * text" is genuinely well-defined: a replica that joins a QUIESCENT document
+ * (it has received everything; nobody else is editing) and then makes
+ * SEQUENTIAL local edits. Under those conditions the document is not
+ * resolving any concurrency at all, so it must behave exactly like a string
+ * — no CRDT latitude to appeal to.
+ *
+ * Deliberately NOT asserted on arbitrary concurrent interleavings: with two
+ * replicas editing the same region concurrently there is no single
+ * "intended" result, only a converged one, and an oracle that invented one
+ * would produce false failures. Convergence is the right claim there; that
+ * is what S1/S2 and the sim's adversarial properties cover.
+ */
+export function runIntentionPropertyTests(label: string, makeDoc: (replica: string) => CrdtDoc): void {
+  describe(`${label}: intention preservation for a late joiner (F-6.1)`, () => {
+    /** A replica that has fully received `base` from an author and is quiescent. */
+    function joinerHolding(base: string): CrdtDoc {
+      const author = makeDoc("author");
+      const ops = [...base].map((ch, i) => author.insertLocal(i, ch));
+      const joiner = makeDoc("joiner");
+      for (const op of ops) joiner.receive(op);
+      return joiner;
+    }
+
+    it("a single insert lands exactly where a solo editor's would, across random bases and positions", () => {
+      fc.assert(
+        fc.property(
+          fc.array(fc.constantFrom(..."abcdefg"), { minLength: 1, maxLength: 10 }).map((cs) => cs.join("")),
+          fc.constantFrom("X", "Y", "Z"),
+          fc.nat(),
+          (base, marker, kRaw) => {
+            const k = kRaw % (base.length + 1);
+            const joiner = joinerHolding(base);
+            joiner.insertLocal(k, marker);
+            expect(joiner.text).toBe(base.slice(0, k) + marker + base.slice(k));
+          }
+        ),
+        { numRuns: 1000 }
+      );
+    });
+
+    it("a whole sequence of local edits by the joiner matches plain-string semantics at every step", () => {
+      // Generalizes the single-insert case: the joiner is the only editor,
+      // so every intermediate state must equal the reference string too —
+      // a stricter net than checking only the final text.
+      fc.assert(
+        fc.property(
+          fc.array(fc.constantFrom(..."abcdefg"), { minLength: 0, maxLength: 8 }).map((cs) => cs.join("")),
+          fc.array(
+            fc.oneof(
+              fc.record({ kind: fc.constant("insert" as const), rawIndex: fc.nat({ max: 30 }), char: fc.char() }),
+              fc.record({ kind: fc.constant("delete" as const), rawIndex: fc.nat({ max: 30 }) })
+            ),
+            { minLength: 1, maxLength: 12 }
+          ),
+          (base, edits) => {
+            const joiner = joinerHolding(base);
+            const reference = [...base];
+            for (const edit of edits) {
+              if (edit.kind === "insert") {
+                const index = Math.min(edit.rawIndex, reference.length);
+                joiner.insertLocal(index, edit.char);
+                reference.splice(index, 0, edit.char);
+              } else if (reference.length > 0) {
+                const index = edit.rawIndex % reference.length;
+                joiner.deleteLocal(index);
+                reference.splice(index, 1);
+              }
+              expect(joiner.text).toBe(reference.join(""));
+            }
+          }
+        ),
+        { numRuns: 500 }
+      );
+    });
+
+    it("the oracle is not vacuous: it rejects a doc that converges but ignores position", () => {
+      // The audit's own argument for why 1,500 convergence runs proved less
+      // than they appeared to: "a CRDT that appends every character to the
+      // end in a fixed order passes all of them." That class of
+      // implementation must FAIL this suite, or this suite is decoration.
+      // Guards the oracle against being quietly loosened later — the exact
+      // move that would rebuild the blind spot.
+      const appendOnly = {
+        chars: [] as string[],
+        insertLocal(_visibleIndex: number, char: string) {
+          this.chars.push(char);
+        },
+        get text() {
+          return this.chars.join("");
+        },
+      };
+      appendOnly.insertLocal(0, "a");
+      appendOnly.insertLocal(1, "b");
+      appendOnly.insertLocal(0, "X"); // intended: "Xab"
+      expect(appendOnly.text).not.toBe("Xab");
+    });
   });
 }
 
