@@ -1,7 +1,8 @@
 # Starling: Technical Architecture
 
-**Companion to:** `01-PRD.md`
-**Audience:** an implementing agent with no repo access and no memory of the prior build
+**Companion to:** [`01-PRD.md`](01-PRD.md)
+
+How Starling is put together: the package graph and the boundaries that CI enforces, the CRDT core (identity, order, merge), the wire format, the deterministic simulator, the relay, the provider, anchors and awareness, and the editor binding.
 
 ---
 
@@ -17,14 +18,14 @@ packages/
   demo/       React app. the only package allowed to touch a browser.
 ```
 
-Dependency direction is strictly downward: `demo → editor → provider → crdt`, and `sim → crdt`, and `relay → nothing`.
+Dependencies flow strictly downward: `demo → editor → provider → crdt`, `sim → crdt`, and `relay → nothing`.
 
-**Two CI gates enforce this and both must fail the build, not warn:**
+**Two CI gates enforce this, and both fail the build rather than warn:**
 
 1. **Core isolation**, enforced two ways:
-   - **Structurally, by the compiler.** `packages/crdt`'s `tsconfig.json` sets `"lib": ["ES2022"]` and `"types": []`. With no DOM lib and no ambient `@types/node`, referencing `window`, `document`, `fetch`, `localStorage`, `process`, `Buffer`, or `setTimeout` is a type error, not a style violation — the gate needs no maintenance as new banned names come up, because there is no lib declaring them to reference. Test files are exempt: they get their own `tsconfig.test.json`, permissive on purpose, because a test is allowed to construct a scenario with real time or real randomness — only the implementation under test is not.
-   - **By grep, for what typechecking can't catch.** `packages/crdt` has an empty `dependencies` block, and empty `peerDependencies` and `optionalDependencies` too — an optional dependency still ships to consumers. No source file may call `Date.now()` / `new Date(` / `Math.random()` / `performance.now()` / `crypto.randomUUID()` / `crypto.getRandomValues()` / `setTimeout()` / `setInterval()` / `fetch()` / `WebSocket` / `process.hrtime()` / `process.uptime()` / `requestAnimationFrame()`, or reference `self` / `globalThis` (both banned as indirection: `globalThis.crypto.randomUUID()` reaches the same nondeterminism through a property access no single-symbol grep would catch) or any DOM global. Time and randomness are injected — `ReplicaId` included: the core never generates one, it is passed in at construction. A CRDT that reads an ambient clock, schedules against real time, or mints its own randomness cannot be tested deterministically, and the sim in §4 depends on this absolutely. (`docs/DECISIONS.md` #0001, #0004 — the original list missed `new Date(` and both `crypto` calls, then missed `setTimeout`/`setInterval` entirely: a core that never reads the clock but still schedules a real-time retry bypasses the virtual clock in §4 just as thoroughly, and no `Date.now()` grep would ever see it.)
-2. **Relay ignorance.** `packages/relay` contains no import from `packages/crdt` and no occurrence of the strings `ElemId`, `Fugue`, `tombstone`, `originLeft`, `originRight`, `compareElemIds`. The relay must not know what it is relaying. See §5. (`docs/DECISIONS.md` #0002 — the original list banned the bare word `origin`, which collides with the legitimate `req.headers.origin` CORS check required by §2.3 of the security doc.)
+   - **Structurally, by the compiler.** `packages/crdt`'s `tsconfig.json` sets `"lib": ["ES2022"]` and `"types": []`. With no DOM lib and no ambient `@types/node`, referencing `window`, `document`, `fetch`, `localStorage`, `process`, `Buffer`, or `setTimeout` is a type error, not a style violation — the gate needs no maintenance as new banned names appear, because there is no lib declaring them to reference. Test files are exempt via their own permissive `tsconfig.test.json`: a test is allowed to construct a scenario with real time or real randomness; only the implementation under test is not.
+   - **By grep, for what typechecking cannot catch.** `packages/crdt` has empty `dependencies`, `peerDependencies`, and `optionalDependencies` (an optional dependency still ships to consumers). No source file calls `Date.now()` / `new Date(` / `Math.random()` / `performance.now()` / `crypto.randomUUID()` / `crypto.getRandomValues()` / `setTimeout()` / `setInterval()` / `fetch()` / `WebSocket` / `process.hrtime()` / `process.uptime()` / `requestAnimationFrame()`, and references neither `self` / `globalThis` (both banned as indirection — `globalThis.crypto.randomUUID()` reaches the same nondeterminism through a property access no single-symbol grep would catch) nor any DOM global. Time and randomness are injected — `ReplicaId` included: the core never generates one, it is passed in at construction. A CRDT that reads an ambient clock, schedules against real time, or mints its own randomness cannot be tested deterministically, and the simulator in §4 depends on this absolutely.
+2. **Relay ignorance.** `packages/relay` contains no import from `packages/crdt` and no occurrence of `ElemId`, `Fugue`, `tombstone`, `originLeft`, `originRight`, or `compareElemIds`. The relay must not know what it is relaying (see §5).
 
 ---
 
@@ -33,33 +34,30 @@ Dependency direction is strictly downward: `demo → editor → provider → crd
 ### 2.1 Element identity
 
 ```ts
-type ReplicaId = string;              // random, assigned at replica creation
-type ElemId = { replica: ReplicaId; counter: number };
+type ReplicaId = string;                            // random, assigned at replica creation
+type ElemRef = { replica: ReplicaId; counter: number };          // identity only
+type ElemId = ElemRef & { clock: number };                       // identity + causal order
 ```
 
-Every character ever inserted gets an `ElemId` that is globally unique and **never reused**. Position is not identity. Index is not identity. A character that moves because someone typed above it is the same character.
+Every character ever inserted gets an `ElemId` that is globally unique and **never reused**. Position is not identity, and index is not identity: a character that moves because someone typed above it is the same character.
 
-`compareElemIds(a, b)` is a **total order** over all ids: compare `counter`, tiebreak on `replica` lexicographically. Total, deterministic, and computable by any replica without coordination.
+The `counter` is a per-replica sequence number — dense and contiguous, which is what makes state-vector sync exact (§3.2). The `clock` is a Lamport timestamp, and it exists for a reason worth spelling out, because the design initially concluded it was unnecessary.
 
-**Finding from the prior build, reproduce it, do not skip it.** Before implementing the merge rule, run an exhaustive search: every origin forest on up to six elements, every causal delivery order. The prior build did this and got a result that contradicted its own architecture doc.
+An early exhaustive search — every origin forest on up to six elements, every causal delivery order, 16,807 forests at n=6 — established that RGA **converges under any total order on identifiers at all**, with or without causal monotonicity. Convergence never needed a Lamport clock. For a while the id was just `(replica, counter)`.
 
-> RGA converges under **any** total order on identifiers at all. Zero divergence across all 16,807 forests at n=6, with or without causal monotonicity.
-
-The counter is therefore **not a Lamport clock and does not need to be**. Convergence does not depend on the clock. This matters later (§3.2), where sync wants contiguous counters and a Lamport clock would forbid them. Because convergence never needed the clock, sync wins that argument for free. Write this finding into `docs/DECISIONS.md`.
+That was correct about *convergence* and wrong about *intention*. Ordering by the bare counter meant a replica joining an existing document allocated low counters that sorted beneath content already there, so its inserts landed in the wrong place — every replica agreed, on the wrong answer. The fix (finding F-1) was to add the Lamport `clock` and order by it, so an op created after seeing another element always sorts above it. Identity stayed `(replica, counter)` — split out as `ElemRef`, used for every lookup and for sync — while ordering moved to the clock. `compareElemIds` compares `clock` first, then breaks genuine concurrency (equal clocks) on `replica`. The counter stays contiguous, so §3.2's sync argument still holds; that is exactly why identity and ordering are separate fields.
 
 ### 2.2 The abstract `Sequence`
 
-All four document classes (§4 of PRD) inherit one base that owns: id allocation, the counter, causal buffering of out-of-order ops, idempotence (applying the same op twice is a no-op), and the local editing API. This base is Step 2's deliverable (§5 of PRD), so it does not exist at Step 1 — `NaiveDoc` (exhibit 1) is necessarily built standalone first and retrofitted onto `Sequence` when this step lands. "All four share one base" describes the repo from Step 2 onward, not Step 1's snapshot of it.
+All four document classes inherit one base that owns id allocation, the per-replica counter and Lamport clock, causal buffering of out-of-order ops, idempotence (applying the same op twice is a no-op), and the local editing API. Subclasses override exactly one method: `integrate(op)` — the merge rule and nothing else.
 
-Subclasses override exactly one method: `integrate(op)`. That is the merge rule and nothing else.
+The consequence is that `RgaDoc` and `Doc` differ by roughly one `while` loop. That is deliberate: the museum only teaches if the delta is small enough to read.
 
-The consequence is that `RgaDoc` and `Doc` differ by roughly one `while` loop. This is deliberate and is a deliverable: the museum only teaches if the delta is small enough to read.
-
-**Why `NaiveDoc` belongs on this base too, not just the other three.** Once `NaiveDoc` sits on `Sequence`, it gets a real `ElemId` per character, idempotence, and causal delivery — everything `ArrayDoc` gets — and it still diverges, because `integrate(op)` still places by raw index and ignores the id. That is the sharpest demonstration in the repo that identity and a correct merge rule are two separate things (§2.4's "position is not identity," one level up: *having* identity is not the same as a merge rule that *uses* it). See `01-PRD.md` §4 for the full two-beat version of this. Do not read `NaiveDoc` still failing after the retrofit as a bug to fix — a change that makes it converge without changing `integrate`'s logic has broken the exhibit.
+`NaiveDoc` sits on this base too. Once it does, it has a real `ElemId` per character, idempotence, and causal delivery — everything `ArrayDoc` has — and it *still* diverges, because its `integrate(op)` places by raw index and ignores the id. That is the sharpest demonstration in the repository that identity and a correct merge rule are two separate things: having identity is not the same as a merge rule that uses it (the two-beat lesson in [PRD §4](01-PRD.md)).
 
 ### 2.3 Fugue, and why not RGA
 
-**RGA's merge rule** is four lines. Insert after your origin, then skip forward past any concurrent elements with a higher-precedence id:
+**RGA's merge rule** is four lines — insert after your origin, then skip forward past any concurrent elements with a higher-precedence id:
 
 ```ts
 protected override integrate(op: InsertOp): void {
@@ -71,45 +69,36 @@ protected override integrate(op: InsertOp): void {
 
 It converges. It is also **wrong in a way users can see.**
 
-**The backward-typing anomaly.** Two people each type a word backwards (each new character inserted to the *left* of the previous one, which is what happens when you type into the start of a line, or when a user pastes-and-fixes). Under RGA, the two words **interleave**, character by character, into an unreadable mess. Both replicas agree on the mess, so convergence tests pass and the bug ships.
+**The backward-typing anomaly.** Two people each type a word backwards — each new character inserted to the *left* of the previous one, which is what happens when you type into the start of a line, or paste-and-fix. Under RGA the two words **interleave**, character by character, into an unreadable mess. Both replicas agree on the mess, so convergence tests pass and the bug ships. Convergence is not correctness; agreeing on garbage is still agreeing.
 
-Convergence is not correctness. Agreeing on garbage is still agreeing.
-
-**Fugue** fixes this by tracking, for each element, whether it was inserted to the left or right of its origin, and keeping same-side siblings grouped. Concurrent runs stay contiguous instead of shuffling.
-
-**Requirement:** Step 6 must *first* write a test that demonstrates the interleaving under `RgaDoc`, watch it fail to be readable, and only then implement Fugue. The failing artifact is exhibit 3. Do not delete `RgaDoc` after Fugue lands.
+**Fugue** fixes this by tracking, for each element, whether it was inserted to the left or right of its origin, and keeping same-side siblings grouped, so concurrent runs stay contiguous instead of shuffling. `RgaDoc` is kept as exhibit 3, with a test that pins the interleaved output as a literal string — because fixing that file would delete the evidence.
 
 ### 2.4 Deletion is a tombstone
 
-Deleted characters are marked, never removed. The `ElemId` must stay resolvable forever, because a concurrent op may reference it as an origin and an anchor may point at it.
+Deleted characters are marked, never removed. The `ElemId` stays resolvable forever, because a concurrent op may reference it as an origin and an anchor may point at it.
 
-Consequence: two indices exist, and confusing them is the most likely bug in this codebase.
+Two indices therefore coexist, and confusing them is the most likely bug in this codebase:
 
-- **Internal index** — position among all elements, tombstones included
-- **Visible index** — position among live elements only, which is what the user and ProseMirror see
+- **Internal index** — position among all elements, tombstones included.
+- **Visible index** — position among live elements only, which is what the user and ProseMirror see.
 
 The mapping between them is not free, which is what forces §2.5.
 
-**`del(id)` is idempotent and commutative for free**, because two replicas deleting the same character emit the *same operation*. "Deleted" is a monotone fact, not a value. Preserve this property. It is load-bearing for §3.1.
+`del(id)` is **idempotent and commutative for free**, because two replicas deleting the same character emit the *same operation*. "Deleted" is a monotone fact, not a value — and that property is load-bearing for §3.1.
 
-**Therefore: revive is not a thing.** The inverse of `del(id)` is **not** reviving that id. It is inserting a **new** character immediately before the tombstone, which is still sitting exactly where the old one was: `Sequence.insertBefore(id, char)`.
-
-The prior build's architecture doc originally said "revive that ID" and proposed a last-write-wins register per element. That was wrong, and the reason is worth keeping. An LWW register would preserve identity, but it would cost the run-length encoded delete set (§3.1: 60,000 deletions in 29 bytes, which works *only* because "deleted" is monotone) and it would cost the free commutativity above. Position is restored perfectly either way. Identity is not, so a comment anchored to revived text does not come back. Yjs makes the same trade.
+**So revive is not a thing.** The inverse of `del(id)` is not reviving that id; it is inserting a **new** character immediately before the tombstone, which is still sitting exactly where the old one was: `insertBefore(id, char)`. An earlier design proposed a last-write-wins register per element to make revive work, and it was wrong: an LWW register would preserve identity, but it would cost the run-length-encoded delete set (§3.1: tens of thousands of deletions in a handful of bytes, which works *only* because "deleted" is monotone) and the free commutativity above. Position is restored perfectly either way; identity is not, so a comment anchored to revived text does not come back. Yjs makes the same trade.
 
 ### 2.5 The order-statistic treap
 
-**Do not store the sequence in an array.** The prior build did, measured it, and had to rip it out at step 4b.
+The sequence is not stored in a plain array. An array gives O(n) `indexOf` for origin lookup and O(n) splice per insert, and since cold-open replays the whole op log every time anyone opens the document, that O(n)-per-op cost compounds into an unusable open time at scale (`ArrayDoc` demonstrates it).
 
-The array gives O(n) `indexOf` for origin lookup and O(n) splice per insert. Benchmarked cold-open of a 100k-character document **extrapolated to ~41 seconds**. Cold-open is the common case: it is what happens every time anyone opens the document, because the whole op log replays.
+`RgaDoc` uses an **order-statistic treap** instead:
 
-Replace with an **order-statistic treap**:
+- **Hashed priorities.** Priority is `hash(ElemId)`, not `Math.random()` — required, not stylistic: it keeps the core deterministic (§1) and makes the tree shape identical on every replica, so divergence bugs reproduce.
+- **Parent pointers**, to walk upward from a node and compute its index without a root-down search.
+- **Subtree size counts**, maintained on rotation, giving O(log n) `indexOf` and index-to-node — with two counts per node, total subtree size and *live* subtree size, the live count being what makes the visible↔internal mapping O(log n).
 
-- **Hashed priorities.** Priority is `hash(ElemId)`, not `Math.random()`. This is required, not stylistic: it keeps the core deterministic (§1 gate 1) and it makes the tree shape identical on every replica, which makes divergence bugs reproducible.
-- **Parent pointers.** Needed to walk upward from a node to compute its index without a root-down search.
-- **Subtree size counts**, maintained on rotation. These give O(log n) `indexOf` and O(log n) index-to-node.
-- **Two counts per node**, actually: total subtree size and *live* subtree size. The live count is what makes the visible↔internal mapping in §2.4 O(log n) instead of O(n).
-
-Target: S6, 100k cold-open under 1 second.
+`Doc` (Fugue) is a tree of same-side sibling buckets rather than a treap. It meets the S6 cold-open target (100k under 1s) by maintaining its size counters lazily — recomputing them in one bulk pass only when a visible-index query needs them, rather than walking to the root on every op (finding F-8). Giving Fugue the full order-statistic-treap structure `RgaDoc` already has, so that local editing is incremental too, is scoped as future work.
 
 ---
 
@@ -117,37 +106,31 @@ Target: S6, 100k cold-open under 1 second.
 
 ### 3.1 Binary encoding
 
-JSON is not acceptable here, and not for performance reasons alone: designing the binary format is what surfaced the clock conflict in §2.1.
+The wire format is binary, not JSON — and not only for performance: designing it is what surfaced the identity/ordering split in §2.1.
 
-- **LEB128 varints** for all integers. Counters are small and dense; they should cost one byte.
-- **Replica tables.** A document has few replicas and many ops. Intern `ReplicaId` strings into a per-message table and reference them by index.
-- **Run-length encoded deletions.** Deletions cluster: a user selects a paragraph and hits delete, producing thousands of contiguous ids from one replica with consecutive counters. RLE collapses this. Target from the prior build, reproduce it as a benchmark assertion: **60,000 deletions encode in 29 bytes.**
+- **LEB128 varints** for all integers. Counters are small and dense and should cost one byte.
+- **Replica tables.** A document has few replicas and many ops, so `ReplicaId` strings are interned into a per-message table and referenced by index.
+- **Run-length-encoded deletions.** Deletions cluster: a user selects a paragraph and hits delete, producing thousands of contiguous ids from one replica with consecutive counters. RLE collapses this — 60,000 deletions encode in 15 bytes, against a 29-byte budget.
 
-This is the compression that dies if §2.4's monotone-fact property is traded away. The encoding and the algebra are coupled.
+This compression is what would die if §2.4's monotone-fact property were traded away. The encoding and the algebra are coupled. (The Lamport clock from §2.1 is stored as `clock − counter`, a value that stays ~1 byte for a mostly-solo replica no matter how old the document gets, rather than widening with the absolute clock.)
 
 ### 3.2 State-vector sync
 
-A **state vector** is `Map<ReplicaId, highestContiguousCounter>`. It summarises everything a replica has, in bytes proportional to the number of replicas, not the number of ops.
+A **state vector** is `Map<ReplicaId, highestContiguousCounter>`. It summarizes everything a replica has, in bytes proportional to the number of replicas, not the number of ops. Sync is: send your vector, receive everything you are missing — `doc.missingFrom(theirVector) → ops`.
 
-Sync is: send your vector, receive everything you are missing. `doc.missingFrom(theirVector) → ops`.
-
-**This requires contiguous counters.** If replica A's counters are 1, 2, 3, 7, 9 then "I have up to 9" is a lie and "I have up to 3" is wasteful. Contiguity makes the vector exact.
-
-A Lamport clock would break contiguity, since it jumps forward on receipt of remote ops. §2.1 established that convergence does not need a Lamport clock. So counters stay contiguous and per-replica, and sync gets to be exact. **Record this in the decision log as the moment two requirements collided and the exhaustive search resolved it.**
+This requires **contiguous counters**. If replica A's counters are 1, 2, 3, 7, 9 then "I have up to 9" is a lie and "I have up to 3" is wasteful; contiguity makes the vector exact. Ordering by a Lamport clock would break contiguity, since a Lamport value jumps forward on receipt of remote ops — which is exactly why identity (`counter`, contiguous) and ordering (`clock`, causal) are kept as separate fields on the id (§2.1). Sync reads the counter and stays exact; placement reads the clock and stays causal.
 
 ---
 
 ## 4. The simulator
 
-`packages/sim` is how S3 and S4 get verified. Test-only, never shipped.
+`packages/sim` is how S3 and S4 are verified. It is test-only and never shipped. Three parts:
 
-Three parts:
+1. **Seeded RNG.** Every run is reproducible from a seed; on failure the seed is printed, and it goes into the bug report and the regression test.
+2. **Virtual clock.** No `setTimeout`, no real time — time advances because the test says so. This is why the core-isolation gate (§1) exists.
+3. **Delivery queue.** Holds in-flight messages and delivers them in an RNG-chosen order, tie-broken on a stable sequence number rather than on collection iteration order, so the simulator itself is deterministic.
 
-1. **Seeded RNG.** Every run is reproducible from a seed. On failure, print the seed. The seed goes in the bug report and the regression test.
-2. **Virtual clock.** No `setTimeout`, no real time. Time advances because the test says so. This is why §1 gate 1 exists.
-3. **Delivery queue.** Holds in-flight messages and delivers them in an order the RNG chooses. **Tiebreak on sequence number**, not on insertion order into the queue, or the simulator is itself nondeterministic and you will spend a day finding out.
-
-The sim must be able to: drop messages, duplicate messages, reorder arbitrarily, partition the network into groups, and heal partitions. Convergence assertions run after healing and after quiescence.
+The simulator can drop messages, duplicate them, reorder arbitrarily, partition the network into groups, and heal partitions. Convergence assertions run after healing and after quiescence.
 
 ---
 
@@ -156,35 +139,29 @@ The sim must be able to: drop messages, duplicate messages, reorder arbitrarily,
 An **append-only log with a cursor**. That is the entire design.
 
 ```
-POST /doc/:id     append opaque bytes, return offset
-GET  /doc/:id?from=N   stream bytes from offset N
+POST /doc/:id          append opaque bytes, return offset
+GET  /doc/:id?from=N    return bytes from offset N to the current end
 ```
 
-The relay does not parse ops. It does not merge. It does not validate. It does not know what a CRDT is. It appends bytes and hands back bytes from an offset.
+The relay does not parse ops. It does not merge, validate, or know what a CRDT is. It appends bytes and hands back bytes from an offset.
 
-This is enforced by CI (§1 gate 2) because it is the single most valuable structural claim the project makes: **the server is dumb, so the server cannot be the authority, so there is no authority.** Every time someone adds "just a little validation" to a relay, the system quietly becomes client-server and the whole argument collapses.
+This is enforced by CI (§1) because it is the single most valuable structural claim the project makes: **the server is dumb, so the server cannot be the authority, so there is no authority.** Every time a little validation creeps into a relay, the system quietly becomes client-server and the whole argument collapses.
 
-Storage for v1: in-memory log plus append to disk. No database. Replay on boot.
+Storage is an in-memory log with append-to-disk and replay on boot — no database. (Because the log is durable on disk, the in-memory copy is a bounded cache over it: an evicted document is re-hydrated from disk on the next access rather than served as empty — finding F-4.)
 
 ---
 
 ## 6. The provider
 
-Client-side glue. Owns the socket, the local persistence, and the sync loop.
+Client-side glue: it owns the transport, the local persistence, and the sync loop. The design decision worth preserving is that **there is no offline queue.**
 
-**The discovery worth preserving:** there is no offline queue.
-
-The instinct is to buffer unsent ops in a queue while disconnected and flush on reconnect. That queue is a second source of truth, it can disagree with the document, and reconciling it is a bug farm.
-
-It is unnecessary. The document already knows what it has, and the state vector already knows what the server has. The entire offline story is:
+The instinct is to buffer unsent ops in a queue while disconnected and flush on reconnect. That queue is a second source of truth, it can disagree with the document, and reconciling it is a bug farm. It is also unnecessary — the document already knows what it has, and the state vector already knows what the server has, so the entire offline story is:
 
 ```ts
 const missing = doc.missingFrom(lastPushedVector);
 ```
 
-Reconnect, ask the relay for its cursor, compute the delta, push. Disconnection is not a special state. It is just a long gap between syncs. **Do not build a queue.**
-
-Local persistence: IndexedDB in the browser, holding the encoded op log plus the last-pushed vector. Reload replays it.
+Reconnect, ask the relay for its cursor, compute the delta, push. Disconnection is not a special state; it is a long gap between syncs. Local persistence is IndexedDB, holding the encoded op log plus the last-pushed vector, and reload replays it. (The sync loop serializes its runs so overlapping calls cannot corrupt the read cursor, and tolerates a torn or malformed relay tail instead of wedging on it — finding F-5.)
 
 ---
 
@@ -192,40 +169,28 @@ Local persistence: IndexedDB in the browser, holding the encoded op log plus the
 
 Two different lifetimes, and conflating them is a design error.
 
-**Anchors are permanent.** A cursor is not an index, it is an `ElemId` plus a side (before/after that character). When a remote user inserts text above your cursor, your cursor does not move, because it was never at a number. It was pointing at a character, and that character has not moved either. This is S10 and it is the thing that makes collaborative editing feel non-hostile.
+**Anchors are permanent.** A cursor is not an index; it is an `ElemId` plus a side (before or after that character). When a remote user inserts text above your cursor, your cursor does not move, because it was never at a number — it was pointing at a character, and that character has not moved either. This is S10, and it is what makes collaborative editing feel non-hostile. Anchors survive tombstoning: the anchored character can be deleted and the anchor still resolves, because the tombstone is still there holding the position.
 
-Anchors survive tombstoning: the anchored character can be deleted and the anchor still resolves, because the tombstone is still there holding the position.
-
-**Awareness is ephemeral.** Presence (who is here, where is their cursor, what colour are they) is last-write-wins per replica, with a TTL, and is **never persisted and never written to the op log**. A user who closes their laptop should evaporate, not leave a ghost in the document forever.
-
-Awareness travels over the same relay, on a separate channel, and the relay still does not know what it means.
+**Awareness is ephemeral.** Presence — who is here, where their cursor is, what color they are — is last-write-wins per replica, with a TTL, and is never persisted and never written to the op log. A user who closes their laptop should evaporate, not leave a ghost in the document forever. Awareness travels over the same relay on a separate channel, and the relay still does not know what it means.
 
 ---
 
 ## 8. Editor binding and undo
 
-**The binding is headless and testable in node.** ProseMirror's model layer does not need a browser; only its view layer does. Bind to the model, test the whole thing in Vitest with no jsdom. If the binding needs a DOM to be tested, it is wrong.
+**The binding is headless and testable in node.** ProseMirror's model layer needs no browser; only its view layer does. The binding targets the model, so the whole of `packages/editor` is testable in Vitest with no jsdom — which matters because the interesting bugs in a collaborative editor are concurrency bugs, and the simulator that provokes them runs in node.
 
 The binding maps ProseMirror transactions to CRDT ops and CRDT changes back to ProseMirror steps, using visible indices at the boundary and `ElemId`s everywhere inside.
 
-**Undo transforms nothing.**
-
-This is the punchline of the whole project and it should be a section in the README. Operational transformation exists, in large part, to make undo work under concurrency: you have to transform the inverse operation against everything that happened since, or you undo the wrong thing.
-
-With a CRDT, undo of "insert x" is "delete the element with *this id*". That id is still that id. It does not matter what happened in between, who else typed, or how the indices moved. There is nothing to transform. The undo manager keeps a stack of `ElemId`s and inverse ops, and applies them directly.
-
-Per §2.4, undo of a delete is `insertBefore(tombstoneId, char)`, not a revive.
-
-Undo is **per-replica**: undo pulls back *your* last edit, not the last edit globally. This falls out of the id-based design for free and is the correct behaviour anyway.
+**Undo transforms nothing** — and this is the punchline of the whole project. Operational transformation exists, in large part, to make undo work under concurrency: the inverse operation has to be transformed against everything that happened since, or it undoes the wrong thing. With a CRDT, undo of "insert x" is "delete the element with *this id*". That id is still that id, regardless of what happened in between, who else typed, or how the indices moved. There is nothing to transform: the undo manager keeps a stack of `ElemId`s and inverse ops and applies them directly. Undo of a delete is `insertBefore(tombstoneId, char)`, not a revive (§2.4). Undo is per-replica — it pulls back *your* last edit, not the last edit globally — which falls out of the id-based design for free and is the correct behavior anyway. `prosemirror-history` is deliberately not used: it is an OT-shaped undo built for a world where positions move, and wiring it in would import the exact problem this project exists to demonstrate the absence of.
 
 ---
 
-## 9. Benchmarks (step 15)
+## 9. Benchmarks
 
-Committed numbers in `bench/README.md`, honest, including the ones that lose.
+Committed, reproducible numbers live in [`bench/README.md`](../bench/README.md), honest ones included:
 
-- Cold-open: 1k / 10k / 100k characters. Target < 1s at 100k (S6). Include the pre-treap array number (~41s extrapolated) as the comparison.
+- Cold-open at 1k / 10k / 100k characters, against the < 1s-at-100k target (S6), with the pre-fix numbers kept for comparison.
 - Encode/decode round-trip throughput.
-- The 60k-deletions-in-29-bytes assertion (§3.1).
+- The 60k-deletions RLE assertion (§3.1).
 - Memory per character, with tombstones, at 100k.
-- **Comparison against Yjs on the same workloads.** Expect to lose. Report it anyway, the way Cotangent reported being 5-7x slower than cuBLAS. An honest loss against a mature library is more credible than a suspicious win, and a fabricated win is the fastest way to fail an interview.
+- **A comparison against Yjs on the same workloads.** Yjs wins on cold-open replay and on wire size; the numbers are reported anyway, because an honest loss against a mature library is more credible than a suspicious win.
