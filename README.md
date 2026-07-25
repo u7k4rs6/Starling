@@ -5,22 +5,18 @@
 <br/>
 
 ![tests](https://img.shields.io/badge/tests-328%20green-f5c518?style=flat-square&labelColor=131518)
+![npm](https://img.shields.io/badge/npm-starling--crdt%400.1.0-f5c518?style=flat-square&labelColor=131518)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-f5c518?style=flat-square&labelColor=131518)
-![ci gates](https://img.shields.io/badge/ci%20gates-2%20enforced-f5c518?style=flat-square&labelColor=131518)
-![node](https://img.shields.io/badge/node-%E2%89%A522-8a8f98?style=flat-square&labelColor=131518)
+![ci gates](https://img.shields.io/badge/ci%20gates-2%20enforced-8a8f98?style=flat-square&labelColor=131518)
 ![license](https://img.shields.io/badge/license-MIT-8a8f98?style=flat-square&labelColor=131518)
-
-**[Why it exists](#why-this-exists) · [The exhibit](#convergence-is-not-correctness) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Benchmarks](#benchmarks-including-the-losses) · [Scorecard](#scorecard) · [Findings](#findings)**
 
 </div>
 
 <br/>
 
-## Why this exists
+A collaborative text editor built on CRDTs, written from scratch in TypeScript. Several people edit one document at once, from different machines, some of them offline, and every copy ends up identical — with no server deciding who wins.
 
-A real-time collaborative text editor built on CRDTs, from scratch, in TypeScript. Two or more people type into the same document at the same time, from different machines, possibly while disconnected, and the document converges to the same state everywhere, with no coordinating server resolving conflicts.
-
-This is a portfolio artifact, not a product. Its value is in the parts that are hard: convergence under concurrency, verified rather than asserted, and a repo that **shows its own failures**. The naive implementation that diverges. The algorithm that interleaves wrong. The data structure that took 168 seconds to open a document that should open in under one. Each one is preserved, each one has a test that documents its bug, and [`docs/DECISIONS.md`](docs/DECISIONS.md) is a running, numbered log of all 28 of those findings, including the ones that were never fixed and why.
+Most of what's interesting here is the stuff that usually gets swept under the rug: the version that silently corrupts your document while passing every test, the data structure that took 168 seconds to open a document, the merge rule that makes everyone agree on garbage. All three are still in the repo, each pinned by a test that reproduces its exact failure, and each is the reason the shipping version is built the way it is.
 
 ```ts
 import { Doc } from "starling-crdt";
@@ -32,25 +28,27 @@ b.receive(a.insertLocal(0, "h"));
 b.receive(a.insertLocal(1, "i"));
 
 a.text; // "hi"
-b.text; // "hi", regardless of delivery order, duplicates or drops
+b.text; // "hi" — same result whatever order the ops arrive in, dupes and drops included
 
-// A cursor is an id plus a side, never an integer offset.
-const anchor = a.anchorAt(1);
+// A cursor is a character id plus a side, never an integer offset.
+const cursor = a.anchorAt(1);
 a.insertLocal(0, "!");
-a.resolveAnchor(anchor); // 2, having followed the character it was attached to
+a.resolveAnchor(cursor); // 2 — it followed the character it was attached to
 ```
+
+`npm install starling-crdt` for the core with no editor, relay, or browser attached. It has zero runtime dependencies.
 
 <br/>
 
-## Convergence is not correctness
+## Convergence isn't the hard part
 
 <img src="docs/assets/convergence.svg" alt="Two replicas each type a word backward at the same time. RGA converges on the jumble dollrloewh. Fugue converges on the clean concatenation ollehdlrow." width="100%">
 
-Every CRDT in this repo converges. That was never the hard part. The hard part is converging on the document a human meant to write.
+Every CRDT in this repo converges. Getting replicas to agree is the easy half. The hard half is getting them to agree on the text a human actually typed.
 
-Two replicas each type a word backward, at index 0, with no knowledge of each other. RGA agrees with itself perfectly and produces `dollrloewh`. Fugue agrees with itself too, and produces `ollehdlrow`: each writer's run left whole, in one order or the other, never zipped together.
+Two people type a word each into the start of a line at the same moment, every keystroke landing to the left of the last. RGA lands on `dollrloewh` — both words shredded together a character at a time. Fugue lands on `ollehdlrow` — each word whole, one after the other. Identical inputs, identical convergence guarantee, and one of them is unusable.
 
-That single difference is why `Doc` (Fugue) is the class that ships and `RgaDoc` is kept as an exhibit. The jumble is pinned as an assertion in [`rga-doc.test.ts`](packages/crdt/src/rga-doc.test.ts) on purpose, because fixing the bug in that file would delete the evidence.
+That gap is the entire reason `Doc` (Fugue) ships and `RgaDoc` stays behind glass as a specimen. The jumble is asserted as a literal string in [`rga-doc.test.ts`](packages/crdt/src/rga-doc.test.ts), because deleting the bug would delete the evidence for why Fugue exists.
 
 <br/>
 
@@ -58,156 +56,100 @@ That single difference is why `Doc` (Fugue) is the class that ships and `RgaDoc`
 
 <img src="docs/assets/architecture.svg" alt="Architecture: demo, editor, provider and crdt in the browser; the relay is an append-only byte log; a deterministic simulator drives the property tests. Two CI gates enforce the boundaries." width="100%">
 
-| Package | What it is |
+| Package | What it does |
 |---|---|
-| [`packages/crdt`](packages/crdt) | The CRDT core, published as `starling-crdt`. No dependencies, no DOM, no ambient clock, all three enforced by a CI gate. `Doc` (Fugue) is the one to use. `RgaDoc`, `ArrayDoc` and `NaiveDoc` are preserved reference implementations, benchmarked honestly alongside it. |
-| [`packages/editor`](packages/editor) | ProseMirror binding: CRDT ops to and from PM transactions and steps, plus an undo manager with no OT and no `prosemirror-history`. |
-| [`packages/provider`](packages/provider) | Local persistence (IndexedDB), the relay transport, the sync loop, presence and awareness. |
-| [`packages/relay`](packages/relay) | An append-only log with a byte cursor. Contains zero CRDT code, enforced by a CI gate. It does not know what a character, a tombstone or an `ElemId` is. |
-| [`packages/demo`](packages/demo) | Two editor panes side by side, connection toggles, remote cursors, offline mode. |
-| [`packages/sim`](packages/sim) | A deterministic simulator: seeded RNG, virtual clock, a delivery queue that drops, duplicates, reorders and partitions. The convergence properties run against this. |
-| [`bench/`](bench) | Committed, reproducible benchmark numbers: cold-open latency, memory, wire size, and a head to head against Yjs. |
+| [`crdt`](packages/crdt) | The algorithm, shipped as `starling-crdt`. `Doc` (Fugue) is the one you use; `RgaDoc`, `ArrayDoc`, and `NaiveDoc` are kept as reference implementations and benchmarked next to it. No dependencies, no DOM, no clock. |
+| [`editor`](packages/editor) | The ProseMirror binding, plus an undo manager that uses no OT and no `prosemirror-history`. Headless — the whole thing runs in Node. |
+| [`provider`](packages/provider) | Client glue: IndexedDB persistence, the relay transport, the sync loop, presence. |
+| [`relay`](packages/relay) | An append-only byte log with a cursor. It has no idea what a character or a tombstone is. |
+| [`demo`](packages/demo) | Two editor panes, connection toggles, remote cursors, an offline switch. |
+| [`sim`](packages/sim) | A deterministic network: seeded RNG, virtual clock, a queue that drops, dupes, reorders, and partitions. The convergence proofs run against it. |
 
-The two dashed walls in the diagram are `tools/gates/core-isolation.mjs` and `tools/gates/relay-ignorance.mjs`. They run in about a second, they run in CI, and they fail the build. They exist because a boundary that lives only in an architecture document is a boundary that quietly stops being true.
+Two boundaries in that diagram are load-bearing enough to guard in CI. One keeps the core deterministic — no `Date.now`, no `Math.random`, no DOM, all injected — so the simulator can replay any bug from a seed. The other keeps the relay ignorant: it may not import the CRDT package or so much as mention `ElemId`. Both fail the build, not a linter warning, because a boundary that lives only in a design doc stops being true the first week nobody's looking.
 
 <br/>
 
-## Quickstart
+## Run it
 
 ```bash
 pnpm install
-pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run gates
+pnpm test          # 328 property and unit tests
+pnpm run gates     # the two boundary checks
 ```
 
-Run the demo locally, then open two browser tabs on the same document and edit concurrently:
+The demo, two replicas in one page with a wire you can cut:
 
 ```bash
 pnpm --filter @starling/demo run dev:relay   # terminal 1
 pnpm --filter @starling/demo run dev         # terminal 2
 ```
 
-Use just the CRDT core, with no editor, no relay and no browser:
-
-```bash
-npm install starling-crdt
-```
-
-See [`packages/crdt/README.md`](packages/crdt/README.md) for the full API. Benchmarks are reproducible with `pnpm run bench`.
+Open it in two tabs and type into both. Full API in [`packages/crdt/README.md`](packages/crdt/README.md); benchmarks reproduce with `pnpm run bench`.
 
 <br/>
 
-## Offline is not an error state
+## Offline
 
 <img src="docs/assets/offline.svg" alt="Timeline: two replicas exchange ops, the network partitions and both keep editing locally, then on rejoin only the missing ops ship and both converge." width="100%">
 
-Edits apply to the local document first and are persisted to IndexedDB before anything touches the network, so a partition is not a failure mode to recover from. It is a longer gap between syncs. On rejoin, state vectors are compared and only the missing ops ship, never the whole log.
+Edits hit the local document and IndexedDB before anything touches the network, so going offline isn't a failure to recover from — it's just a longer wait until the next sync. There's no outbound queue to reconcile. On reconnect, the two sides compare state vectors and ship only the ops the other is missing, never the whole log.
 
-Convergence under arbitrary delivery order, duplicates, drops and partitions is proved as a property against [`packages/sim`](packages/sim), with a seeded RNG so every counterexample replays exactly.
+The whole thing — arbitrary delivery order, duplicates, drops, partitions that heal — is proved as a property against [`packages/sim`](packages/sim), seeded so any failure replays byte for byte.
 
 <br/>
 
-## Benchmarks, including the losses
+## Benchmarks
 
 <img src="docs/assets/bench.svg" alt="Cold-open of a 100,000 character document on a log scale: Yjs 4.6ms, Doc 110ms, RgaDoc 365ms, the 1 second budget, and Doc before the F-8 fix at 168,000ms." width="100%">
 
-| Measurement | Result |
-|---|---|
-| Cold-open, 100k characters | `Doc` ~110 ms, `RgaDoc` 365 ms, Yjs 4.6 ms. Budget was 1 s. |
-| Cold-open before the F-8 fix | `Doc` 168 s, about 168x over budget and about 36,800x Yjs. Measured, published, then fixed. |
-| Encode and decode | ~1M+ ops/s either direction. Never the bottleneck. |
-| 60,000 deletions on the wire | 15 bytes, against a 29 byte budget. |
-| Memory at 100k characters | ~610 bytes/char live, ~858 once fully tombstoned. Tombstones are permanent by definition. |
-| Wire size, forward typing | ~13.6 bytes/char against Yjs at ~1.00. **Still losing.** Deletions are run-length encoded; consecutive same-replica inserts are not. |
-| Local build, 100k characters | Still super-linear. F-8 fixed the read path, not the write path. |
+Cold-open — replaying a document's whole history, which happens every time anyone opens it — is the number that matters, and it's where the first cut fell apart: **168 seconds** at 100k characters, against a one-second budget. Every integration was walking the tree to the root to keep a size counter fresh, which is quadratic on a document typed front to back. Those counters are a cache nothing reads during replay, so they went lazy. Cold-open is **~110 ms** now.
 
-Full method, machine caveats and the reasoning behind each number: [`bench/README.md`](bench/README.md).
+| At 100k characters | Result |
+|---|---|
+| Cold-open | `Doc` ~110 ms · `RgaDoc` 365 ms · Yjs 4.6 ms |
+| Wire size, forward typing | ~13.6 bytes/char, against Yjs at ~1.0 |
+| Memory | ~610 bytes/char live, ~858 fully tombstoned |
+| 60k deletions on the wire | 15 bytes |
+
+Yjs is still faster on read and much tighter on the wire, and the local write path is still super-linear — the read fix didn't touch it. The method, the machine caveats, and every number that loses are in [`bench/README.md`](bench/README.md).
 
 <br/>
 
-## The four implementations
+## Four implementations, on purpose
 
-The core ships one CRDT and keeps three more, because a claim like "this data structure does not scale" is worth more when the unscalable one is still in the repo, still passing its own tests, still being benchmarked next to the winner.
+"This data structure doesn't scale" carries more when the one that doesn't scale is sitting right there, still green, still benchmarked next to the winner.
 
-| Class | Status | What it is kept to prove |
+| Class | Verdict | Kept to show |
 |---|---|---|
-| `NaiveDoc` | Diverges | Concurrent edits at the same index do not converge. The baseline failure everything else is measured against. |
-| `ArrayDoc` | Correct, unusable | O(n) per operation. Correct at every size and unusable well before 100k. |
-| `RgaDoc` | Correct, interleaves | An order-statistic treap gives it O(log n) operations and the best cold-open here, and it still zips concurrent runs together. |
-| `Doc` | Ships | Fugue. Fixes the interleaving, matches the budget after F-8, still loses on wire size. |
+| `NaiveDoc` | diverges | Two concurrent inserts at one index disagree. The mistake almost everyone makes first. |
+| `ArrayDoc` | correct, unusable | A right merge over an array. O(n) per op — fine at every size you'd never actually reach. |
+| `RgaDoc` | correct, interleaves | A treap makes it O(log n) and the fastest to open. It still shreds concurrent runs. |
+| `Doc` | ships | Fugue. Fixes the shredding, meets the budget, loses on wire size. One `while` loop from `RgaDoc`. |
 
 <br/>
 
-## Scorecard
+## What the audit turned up
 
-Every claim below is independently checkable. That is the point. Status is reported the same way this repo reports a benchmark: plainly, including where it falls short.
+The build shipped with 289 tests. A correctness and security pass took it to 328 and found, among other things:
 
-| # | Criterion | Status |
-|---|---|---|
-| S1 | Two replicas editing concurrently always converge | ✅ `fast-check`, 1000 runs |
-| S2 | Three replicas editing concurrently always converge | ✅ `fast-check`, 500 runs |
-| S3 | Convergence holds under arbitrary delivery order | ✅ `packages/sim`, seeded RNG |
-| S4 | Convergence holds under partition and rejoin | ✅ `packages/sim` |
-| S5 | No interleaving on concurrent backward typing | ✅ Fugue regression test, plus a mid-document intention property |
-| S6 | 100k-character document cold-opens in under 1s | ✅ `Doc` ~110 ms, `RgaDoc` 365 ms. Was 168 s and failing; see F-8 below |
-| S7 | The relay contains zero CRDT code | ✅ CI gate, fails the build otherwise |
-| S8 | The core has no dependencies, no DOM, no ambient clock | ✅ CI gate, fails the build otherwise |
-| S9 | Offline edits survive reload and reconcile on reconnect | ✅ Integration test against a real relay and real IndexedDB. Not live at a public URL yet: that needs a host and a repo-admin click, runbook in [`docs/DEPLOY.md`](docs/DEPLOY.md) |
-| S10 | Cursors survive remote edits above them | ✅ Anchor test |
-| S11 | Undo is correct under concurrency | ✅ Undo test |
-| S12 | `npm install starling-crdt` gives a working CRDT | ✅ Published as [`starling-crdt@0.1.0`](https://www.npmjs.com/package/starling-crdt), with provenance and zero runtime dependencies |
+- **Placement by a bare counter** put a new joiner's text in the wrong spot — everyone agreed, on the wrong answer. Convergence had always held; intention hadn't. A Lamport clock in the id fixed it, and the suite had never been checking intention in the first place, which is why it slipped through 1,500 property runs.
+- **Reload reused character ids.** Replaying a saved log restarted the id counter from zero, so the next edit collided with a live id and vanished.
+- **The relay could hand back an evicted document as empty** and then desync on the next write.
+
+`starling-crdt@0.1.0` is on npm with provenance. Cursors survive edits above them, undo is correct under concurrent remote edits, and the relay still contains zero lines that know what a CRDT is — all checked in CI. The full log, including the findings that were measured and deliberately left unfixed, is in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 <br/>
 
-## Findings
+## Not in scope
 
-Twenty-eight numbered decisions, then a full audit pass on top of them. The suite went from 289 tests to 328 in the process. A representative sample:
-
-| ID | What happened |
-|---|---|
-| F-1 | `ElemId` ordered by a bare per-replica counter, so a replica joining an existing document placed its inserts in the wrong place. Convergence always held. Intention did not. Fixed with a Lamport clock in the id, one varint per op on the wire. |
-| F-2 | Replaying a persisted log into a fresh `Doc` with the same replica id restarted the counter and reissued live ids, silently dropping edits after a reload. |
-| F-6 | The reason F-1 and F-2 both hid: the suite asserted convergence and never intention, and never exercised editing after receiving. Both properties now exist, with a coverage proof. |
-| F-8 | The 168 second cold-open. Every integration walked the tree to the root to keep size counters fresh, which is O(n²) on a forward-typed document. The counters are a cache nobody reads during replay, so they became lazy. Replay is now O(n). |
-| F-4 | A disk-persisted document evicted from the relay's memory cache was served as empty and could desync on the next append. |
-| 0026 | `encodeOps` crashed at 100,000 ops because `push(...records)` spreads an array into call arguments and V8 caps that. Same bug shape as an earlier stack overflow, different mechanism: an operation assumed to be linear turning out to have a hidden size cliff. |
-| 0016 | An S4 property test partitioned replica names that `send()` never used, so the partition silently did nothing. Caught by a failing property, not by reading it. |
-| 0008 | Two gate tests had been green since Step 0 and were both asserting the bug. A test written in the same session as its implementation can certify the implementation's own misconception. |
-
-<details>
-<summary><b>Still open, on purpose</b></summary>
+Rich text past ProseMirror's basic schema, authentication, multi-document workspaces, mobile, operational transformation of any kind, and beating Yjs. The reasoning for each is in the [security doc](docs/03-SECURITY.md); the short version is that a link is the capability, the same trust model as a shared Google Doc.
 
 <br/>
 
-- The local build and interactive-editing path is still super-linear. The fix is a treap-backed Fugue, scoped as future work in `docs/02-ARCHITECTURE.md` §2.5, and unbuilt.
-- No compaction or snapshotting. The op log grows forever, which is fine for a demo document and not fine for a real one.
-- Wire size on forward typing, about 14x Yjs. The Lamport clock is already delta-encoded; insert-run compression, matching the encoding deletions already get, is the remaining lever.
-- No authentication and no defence against a malicious peer. Out of scope by design, stated in `docs/03-SECURITY.md` §4.
+## Reading further
 
-</details>
-
-<br/>
-
-## Deliberate non-goals
-
-Rich text beyond ProseMirror's basic schema. Authentication. Multi-document workspaces. Mobile apps. Operational transformation of any kind. Beating Yjs on benchmarks.
-
-<br/>
-
-## The documents
-
-| File | What is in it |
-|---|---|
-| [`docs/01-PRD.md`](docs/01-PRD.md) | Product requirements and the twelve success criteria above |
-| [`docs/02-ARCHITECTURE.md`](docs/02-ARCHITECTURE.md) | The CRDT algorithm, the wire encoding, the sync protocol |
-| [`docs/03-SECURITY.md`](docs/03-SECURITY.md) | Threat model and the parts left out of it on purpose |
-| [`docs/04-FRONTEND.md`](docs/04-FRONTEND.md) | The demo's interaction model |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Every non-obvious decision, in order, with the evidence that produced it |
-| [`HANDOFF.md`](HANDOFF.md) | Where I would bet this breaks first once it is running in public |
-
-<br/>
-
-<div align="center">
-
-MIT licensed. Built step by step, one finding at a time.
-
-</div>
+- [`docs/01-PRD.md`](docs/01-PRD.md) — what it is and the success criteria it was held to
+- [`docs/02-ARCHITECTURE.md`](docs/02-ARCHITECTURE.md) — the algorithm, the wire format, the sync protocol
+- [`docs/03-SECURITY.md`](docs/03-SECURITY.md) — the trust model, and what's left out of it
+- [`docs/04-FRONTEND.md`](docs/04-FRONTEND.md) — the editor binding and the demo
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — every decision in order, reversals included
