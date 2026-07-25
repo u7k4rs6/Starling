@@ -7,14 +7,21 @@ import type { Op } from "./sequence.js";
  * surfaced the clock conflict in §2.1 (per ARCH), and it's what the
  * 60,000-deletions-in-29-bytes target (§3.1) is checked against.
  *
- * Every record carries its op's own `(replicaIdx, counter, clock)`. The
- * clock is F-1's addition: one varint per op, and only for an op's *own*
- * id — an insert's origin and a delete's target are `ElemRef`s, resolved by
- * lookup rather than compared, so they stay two varints as before. The
- * delete-run record amortizes the clock the same way it already amortizes
- * the counter: one `clock0` for the whole run, reconstructed as
- * `clock0 + k` (see `findDeleteRun` for the eligibility rule that makes
- * that sound), so ARCH §3.1's 60,000-deletions budget still holds.
+ * Every record carries its op's own identity `(replicaIdx, counter)` plus
+ * its Lamport clock (F-1), and only for an op's *own* id — an insert's
+ * origin and a delete's target are `ElemRef`s, resolved by lookup rather
+ * than compared, so they stay two varints as before.
+ *
+ * The clock is stored as `clock - counter`, not `clock` itself. The delta is
+ * always ≥ 1 (a replica's clock exceeds its own counter by construction —
+ * `Sequence.allocateId` bumps the clock before stamping and the counter
+ * after), and for a replica editing mostly on its own it stays ~1 forever,
+ * whereas the absolute clock grows without bound as the document ages. So a
+ * long-lived document's ops keep a ~1-byte varint here instead of an
+ * ever-widening one. Decode reconstructs `clock = counter + delta`. The
+ * delete-run record amortizes it the same way it amortizes the counter: one
+ * delta for the whole run (it is constant across a run — see `findDeleteRun`),
+ * so ARCH §3.1's 60,000-deletions budget still holds.
  *
  * No `TextEncoder`/`TextDecoder`: neither resolves under packages/crdt's
  * restricted tsconfig (lib: ["ES2022"], types: []) — verified, not
@@ -163,13 +170,14 @@ const SIDE_R = 2;
  * for a real selection-delete, where one replica issues one delete op per
  * character it itself typed in one earlier burst.
  *
- * The clock condition is what lets the run record store one `clock0` and
- * have decode reconstruct member k as `clock0 + k` (F-1's new field). It
- * holds for exactly the case the RLE targets: an uninterrupted local burst
- * advances the Lamport counter by one per op. A remote op landing
- * mid-burst makes the clock jump, which correctly splits the run — costing
- * bytes only in a case that was never the contiguous-selection shape this
- * optimization exists for.
+ * The clock condition is what lets the run record store one clock value and
+ * have decode reconstruct every member. It holds for exactly the case the
+ * RLE targets: an uninterrupted local burst advances the Lamport counter by
+ * one per op. A remote op landing mid-burst makes the clock jump, which
+ * correctly splits the run — costing bytes only in a case that was never the
+ * contiguous-selection shape this optimization exists for. (Since both
+ * counter and clock advance by one per member, `clock - counter` — the value
+ * actually stored, see below — is constant across the whole run.)
  */
 function findDeleteRun(ops: CrdtOp[], start: number): number {
   const first = ops[start]!;
@@ -214,7 +222,7 @@ export function encodeOps(ops: CrdtOp[]): Uint8Array {
         records.push(RECORD_DELETE_RUN);
         writeVarUint(records, indexOf.get(op.id.replica)!);
         writeVarUint(records, op.id.counter);
-        writeVarUint(records, op.id.clock);
+        writeVarUint(records, op.id.clock - op.id.counter);
         writeVarUint(records, indexOf.get(target0.replica)!);
         writeVarUint(records, target0.counter);
         writeVarUint(records, runLength);
@@ -225,7 +233,7 @@ export function encodeOps(ops: CrdtOp[]): Uint8Array {
       records.push(RECORD_DELETE_SINGLE);
       writeVarUint(records, indexOf.get(op.id.replica)!);
       writeVarUint(records, op.id.counter);
-      writeVarUint(records, op.id.clock);
+      writeVarUint(records, op.id.clock - op.id.counter);
       writeVarUint(records, indexOf.get(target0.replica)!);
       writeVarUint(records, target0.counter);
       recordCount += 1;
@@ -237,7 +245,7 @@ export function encodeOps(ops: CrdtOp[]): Uint8Array {
     records.push(RECORD_INSERT);
     writeVarUint(records, indexOf.get(op.id.replica)!);
     writeVarUint(records, op.id.counter);
-    writeVarUint(records, op.id.clock);
+    writeVarUint(records, op.id.clock - op.id.counter);
     if (op.payload.l === null) {
       records.push(0);
     } else {
@@ -289,14 +297,17 @@ function decodeOpsFrom(bytes: Uint8Array, pos: { i: number }): CrdtOp[] {
     if (recordType === RECORD_DELETE_SINGLE || recordType === RECORD_DELETE_RUN) {
       const idReplicaIdx = readVarUint(bytes, pos);
       const idCounter0 = readVarUint(bytes, pos);
-      const idClock0 = readVarUint(bytes, pos);
+      const idClockDelta = readVarUint(bytes, pos);
       const targetReplicaIdx = readVarUint(bytes, pos);
       const targetCounter0 = readVarUint(bytes, pos);
       const count = recordType === RECORD_DELETE_RUN ? readVarUint(bytes, pos) : 1;
       for (let k = 0; k < count; k += 1) {
-        // Clock advances in lockstep with the counter across a run — the
-        // eligibility condition `findDeleteRun` enforces at encode time.
-        const id: ElemId = { replica: table[idReplicaIdx]!, counter: idCounter0 + k, clock: idClock0 + k };
+        // The stored field is `clock - counter` (see encodeOps): always ≥ 1,
+        // and constant across a run since clock and counter both advance by 1
+        // per member (the eligibility condition `findDeleteRun` enforces). So
+        // clock = counter + delta reconstructs each member exactly.
+        const idCounter = idCounter0 + k;
+        const id: ElemId = { replica: table[idReplicaIdx]!, counter: idCounter, clock: idCounter + idClockDelta };
         const target: ElemRef = { replica: table[targetReplicaIdx]!, counter: targetCounter0 + k };
         const payload: CrdtPayload = { type: "delete", target };
         ops.push({ id, deps: deriveDeps(payload), payload });
@@ -307,8 +318,8 @@ function decodeOpsFrom(bytes: Uint8Array, pos: { i: number }): CrdtOp[] {
     // insert
     const idReplicaIdx = readVarUint(bytes, pos);
     const idCounter = readVarUint(bytes, pos);
-    const idClock = readVarUint(bytes, pos);
-    const id: ElemId = { replica: table[idReplicaIdx]!, counter: idCounter, clock: idClock };
+    const idClockDelta = readVarUint(bytes, pos); // clock - counter; see encodeOps
+    const id: ElemId = { replica: table[idReplicaIdx]!, counter: idCounter, clock: idCounter + idClockDelta };
     const hasOrigin = bytes[pos.i]!;
     pos.i += 1;
     // No clock: an origin is an `ElemRef`, resolved by lookup against the

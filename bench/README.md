@@ -101,16 +101,17 @@ open, see `docs/DECISIONS.md` #0026.
 `node bench/encode-decode.mjs`:
 
 ```
-n=1000    bytes= 12.3 KiB  encode= 1.6ms  (641,337 ops/s)    decode= 0.8ms  (1,200,273 ops/s)
-n=10000   bytes=126.6 KiB  encode= 8.0ms  (1,248,574 ops/s)  decode= 2.2ms  (4,626,571 ops/s)
-n=100000  bytes= 1.48 MiB  encode=68.9ms  (1,450,434 ops/s)  decode=35.4ms  (2,825,947 ops/s)
+n=1000    bytes= 11.5 KiB  encode= 1.8ms  (564,324 ops/s)    decode= 0.8ms  (1,206,922 ops/s)
+n=10000   bytes=116.9 KiB  encode= 6.8ms  (1,476,734 ops/s)  decode= 1.9ms  (5,199,318 ops/s)
+n=100000  bytes= 1.30 MiB  encode=65.7ms  (1,522,174 ops/s)  decode=21.2ms  (4,714,454 ops/s)
 ```
 
 ~1M+ ops/s either direction, comfortably fast enough that the wire format
-is never the bottleneck in the cold-open numbers above. (Byte sizes grew
-~20% vs the pre-audit figures — 10.5→12.3 KiB at 1k, etc. — because F-1
-added a one-varint Lamport clock per op to fix late-joiner ordering; see
-the wire-size note under § vs Yjs.)
+is never the bottleneck in the cold-open numbers above. (F-1's Lamport clock
+added a varint per op; it is now stored as `clock − counter`, which both
+trims the size — 1.48→1.30 MiB at 100k — and, more importantly, keeps that
+varint ~1 byte as a document ages instead of widening with the absolute
+clock. See the wire-size note under § vs Yjs.)
 
 **A real bug found while building this benchmark:** `encodeOps` crashed
 (`RangeError: Maximum call stack size exceeded`) at n=100,000 — `out.
@@ -130,9 +131,10 @@ recursion depth).
 ```
 
 Matches the figure gated by `packages/crdt/src/encoding.test.ts` (DECISIONS
-#0018). Was 14 bytes before F-1; the run record now carries one extra
-Lamport-clock varint (`clock0`, amortized across the whole run), so 15 —
-still comfortably inside ARCH §3.1's < 29 budget.
+#0018). Was 14 bytes before F-1; the run record now carries one extra clock
+varint — the `clock − counter` delta, constant across the run and amortized
+over all 60,000 members — so 15, still comfortably inside ARCH §3.1's < 29
+budget.
 
 ## Memory per character, with tombstones, at 100k
 
@@ -224,16 +226,18 @@ gap is the incremental-editing structure ARCH §2.5 frames as future work, not
 an unexplained "Doc is slow."
 
 **Wire size, the remaining honest loss:** Yjs's update format is ~1.00-1.01
-bytes/character for a forward-typed document; ours (see encode/decode
-section above) is now ~15.5 bytes/character at 100k — up from ~12.7 before
-F-1 added the one-varint-per-op Lamport clock. ARCH §3.1 only specifies
+bytes/character for a forward-typed document; ours (see encode/decode section
+above) is now ~13.6 bytes/character at 100k. F-1's Lamport clock pushed it to
+~15.5; storing the clock as `clock − counter` brought it back to ~13.6 and,
+more to the point, bounded it — a solo/balanced replica's clock varint stays
+~1 byte no matter how old the document gets, instead of widening with the
+absolute clock. The rest of the gap is that ARCH §3.1 only specifies
 run-length-encoding for *deletions* — consecutive same-replica *inserts* get
-no equivalent compression in this format, while Yjs's update encoding deltas
-consecutive same-client inserts by construction. Not a bug — an intentionally
-narrower scope (§3.1's own target is the deletion case) that costs real bytes
-on the also-extremely-common forward-typing case. (A `clock − counter` delta
-encoding would claw most of the clock's cost back to ~1 byte/op; noted as
-future work, out of scope for the correctness fix that added it.)
+no equivalent compression, while Yjs's update encoding deltas consecutive
+same-client inserts by construction. Not a bug — an intentionally narrower
+scope (§3.1's own target is the deletion case) that costs real bytes on the
+also-extremely-common forward-typing case; insert-run compression is the
+remaining lever.
 
 ## Summary
 
@@ -244,7 +248,7 @@ future work, out of scope for the correctness fix that added it.)
 | Encode/decode throughput | ~1M+ ops/s either direction — never the bottleneck. |
 | Memory/char with tombstones @ 100k | ~610 bytes/char live, ~858 bytes/char once fully tombstoned (~248 bytes/char tombstone overhead). |
 | vs Yjs — cold-open | `Doc` now within ~24-45x (sub-ms to ~110ms, under target), down from ~36,800x. Yjs still faster; same order of magnitude as `RgaDoc`. |
-| vs Yjs — wire size | `Doc` ~15.5 bytes/char vs Yjs's ~1 (forward-typed) — the remaining loss. |
+| vs Yjs — wire size | `Doc` ~13.6 bytes/char vs Yjs's ~1 (forward-typed) — the remaining loss; the clock varint is now bounded (`clock − counter`), insert-run compression is the next lever. |
 
 Three "scales-with-input-size hidden cliff" bugs were found and fixed in this
 area (recursion depth and call-argument count during Step 15; the O(n²)

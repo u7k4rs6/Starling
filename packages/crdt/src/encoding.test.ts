@@ -324,6 +324,47 @@ describe("decodeOpsStreamPartial: tolerant of a truncated trailing blob (F-5)", 
   });
 });
 
+describe("clock is stored as clock−counter, bounding wire cost as a document ages", () => {
+  it("a solo replica's op stays cheap even with a large absolute clock", () => {
+    const N = 100_000; // counter and clock both need a ~3-byte varint
+    // Deep in a long-lived doc, but this replica has edited mostly on its
+    // own, so clock is barely above counter → delta ≈ 1.
+    const solo: CrdtOp = {
+      id: { replica: "A", counter: N, clock: N + 1 },
+      deps: [],
+      payload: { type: "insert", l: null, char: "x", side: "R" },
+    };
+    // Same counter, but a clock far above it (this replica integrated a lot
+    // of concurrent remote activity) → a large delta.
+    const contended: CrdtOp = {
+      id: { replica: "A", counter: N, clock: 2 * N },
+      deps: [],
+      payload: { type: "insert", l: null, char: "x", side: "R" },
+    };
+
+    expect(decodeOps(encodeOps([solo]))).toEqual([solo]);
+    expect(decodeOps(encodeOps([contended]))).toEqual([contended]);
+    // Identical but for the clock: the solo op is strictly smaller, proving
+    // the field encodes clock−counter (delta 1), not the absolute clock (~N).
+    // Were it the absolute clock, both would be the same size.
+    expect(encodeOps([solo]).length).toBeLessThan(encodeOps([contended]).length);
+  });
+
+  it("round-trips a delete run whose clock is far above its counter", () => {
+    // A selection-delete burst by a replica deep in a busy document: counters
+    // 0..2 but clocks starting high. delta = clock−counter is constant across
+    // the run, so it still RLE-encodes and reconstructs each member exactly.
+    const base = 500_000;
+    const ops: CrdtOp[] = [0, 1, 2].map((k) =>
+      makeDelete(
+        { replica: "D", counter: k, clock: base + k },
+        { replica: "T", counter: k }
+      )
+    );
+    expect(decodeOps(encodeOps(ops))).toEqual(ops);
+  });
+});
+
 describe("ARCH §3.1 target: 60,000 deletions encode in 29 bytes", () => {
   it("predicts, then measures: a single contiguous delete run of 60,000 should be small; 29 bytes specifically is not re-derived from the lost original design and may not match exactly", () => {
     // Prediction before measuring: header ~3 bytes (1 replica, short id) +
