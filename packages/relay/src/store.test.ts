@@ -6,6 +6,7 @@ import { isValidDocId, LogStore, MAX_DOCS, MAX_LOG_BYTES_PER_DOC, MAX_MESSAGE_BY
 
 const DOC_A = "11111111-1111-4111-8111-111111111111";
 const DOC_B = "22222222-2222-4222-8222-222222222222";
+const DOC_C = "33333333-3333-4333-8333-333333333333";
 
 function makeUuid(n: number): string {
   const hex = n.toString(16).padStart(12, "0");
@@ -183,5 +184,49 @@ describe("LogStore: disk persistence and replay (ARCH §5)", () => {
     expect(existsSync(path.join(dataDir, "not-a-uuid.log"))).toBe(true);
     store.replayFromDisk();
     expect(store.read("not-a-uuid", 0)).toEqual({ ok: false, error: "invalid document id" });
+  });
+
+  // F-4: when a doc is persisted, the in-memory map is a cache over disk, so
+  // eviction must not lose or corrupt its log. `maxDocs` keeps the cap small
+  // enough to force eviction without writing MAX_DOCS docs to disk.
+  it("F-4: re-hydrates an evicted-but-persisted doc from disk instead of serving it as empty", () => {
+    dataDir = mkdtempSync(path.join(tmpdir(), "starling-relay-"));
+    const store = new LogStore({ dataDir, maxDocs: 2 });
+    store.append(DOC_A, Buffer.from("important history"));
+    // Two more docs push DOC_A out of the 2-slot cache (it is the LRU).
+    store.append(DOC_B, Buffer.from("b"));
+    store.append(DOC_C, Buffer.from("c"));
+
+    // Before the fix this returned an empty log (DOC_A was gone from memory
+    // and read never consulted disk). It must now return the real history.
+    expect(store.read(DOC_A, 0)).toEqual({ ok: true, bytes: Buffer.from("important history") });
+  });
+
+  it("F-4: an append after eviction resumes at the on-disk length, not offset 0, and disk stays coherent", () => {
+    dataDir = mkdtempSync(path.join(tmpdir(), "starling-relay-"));
+    const store = new LogStore({ dataDir, maxDocs: 2 });
+    store.append(DOC_A, Buffer.from("hello ")); // 6 bytes on disk
+    store.append(DOC_B, Buffer.from("b"));
+    store.append(DOC_C, Buffer.from("c")); // evicts DOC_A from the cache
+
+    // Before the fix: a fresh in-memory log reported offset 0 while
+    // appendFileSync appended "world" at disk byte 6 — memory and disk
+    // desynchronised, corrupting every offset after a restart.
+    const resumed = store.append(DOC_A, Buffer.from("world"));
+    expect(resumed).toEqual({ ok: true, offset: 6 });
+
+    // Reads are consistent, and the on-disk file is one coherent log.
+    expect(store.read(DOC_A, 0)).toEqual({ ok: true, bytes: Buffer.from("hello world") });
+    expect(readFileSync(path.join(dataDir, `${DOC_A}.log`)).toString()).toBe("hello world");
+  });
+
+  it("F-4: a truly-unknown doc id (no memory, no disk) still reads as an empty log at offset 0", () => {
+    // The re-hydration path must not turn a never-written doc into an error:
+    // hydrate() returns undefined when no .log file exists, preserving the
+    // "empty log, not an error" contract for from=0.
+    dataDir = mkdtempSync(path.join(tmpdir(), "starling-relay-"));
+    const store = new LogStore({ dataDir, maxDocs: 2 });
+    expect(store.read(DOC_A, 0)).toEqual({ ok: true, bytes: Buffer.alloc(0) });
+    expect(store.read(DOC_A, 5)).toEqual({ ok: false, error: "offset out of range" });
   });
 });

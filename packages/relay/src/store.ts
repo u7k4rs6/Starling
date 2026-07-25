@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -38,13 +38,25 @@ type DocLog = {
  * insertion order — `touch()` re-inserts a key to move it to the
  * most-recently-used end, so the first key is always the least recently
  * used one.
+ *
+ * When `dataDir` is set, the map is a *cache over durable disk*, not the
+ * source of truth: an eviction only drops the in-memory copy, never the
+ * `.log` file. A read or append that misses the cache re-hydrates from disk
+ * (`hydrate`) so an evicted-but-persisted doc is served its real history
+ * instead of an empty log, and a post-eviction append resumes at the log's
+ * true on-disk length instead of restarting at offset 0 and desynchronising
+ * memory from disk (F-4). With no `dataDir` there is nothing to recover
+ * from, so eviction genuinely drops history — the documented in-memory
+ * contract (`store.test.ts`).
  */
 export class LogStore {
   private readonly docs = new Map<string, DocLog>();
   private readonly dataDir: string | null;
+  private readonly maxDocs: number;
 
-  constructor(options: { dataDir?: string } = {}) {
+  constructor(options: { dataDir?: string; maxDocs?: number } = {}) {
     this.dataDir = options.dataDir ?? null;
+    this.maxDocs = options.maxDocs ?? MAX_DOCS;
     if (this.dataDir) mkdirSync(this.dataDir, { recursive: true });
   }
 
@@ -69,7 +81,7 @@ export class LogStore {
   }
 
   private evictOldestIfFull(): void {
-    if (this.docs.size < MAX_DOCS) return;
+    if (this.docs.size < this.maxDocs) return;
     const oldest = this.docs.keys().next().value;
     if (oldest !== undefined) this.docs.delete(oldest);
   }
@@ -79,11 +91,36 @@ export class LogStore {
     return path.join(this.dataDir!, `${docId}.log`);
   }
 
+  /**
+   * The cached log for `docId`, loading it back from disk first if it was
+   * evicted (or never yet paged in) but its `.log` file still exists. The
+   * caller must have already validated `docId`. Returns undefined only when
+   * the doc has no in-memory and no on-disk state — a genuinely-unknown id.
+   * Re-hydration counts against the cache cap like any other insertion, so
+   * paging one doc back in may evict a colder one.
+   */
+  private hydrate(docId: string): DocLog | undefined {
+    const cached = this.docs.get(docId);
+    if (cached) return cached;
+    if (!this.dataDir) return undefined;
+    const diskPath = this.diskPath(docId);
+    if (!existsSync(diskPath)) return undefined;
+    const bytes = readFileSync(diskPath);
+    this.evictOldestIfFull();
+    const doc: DocLog = {
+      chunks: [bytes],
+      totalBytes: bytes.length,
+      frozen: bytes.length >= MAX_LOG_BYTES_PER_DOC,
+    };
+    this.docs.set(docId, doc);
+    return doc;
+  }
+
   append(docId: string, bytes: Buffer): AppendResult {
     if (!isValidDocId(docId)) return { ok: false, error: "invalid document id" };
     if (bytes.length > MAX_MESSAGE_BYTES) return { ok: false, error: "message too large" };
 
-    let doc = this.docs.get(docId);
+    let doc = this.hydrate(docId);
     if (!doc) {
       this.evictOldestIfFull();
       doc = { chunks: [], totalBytes: 0, frozen: false };
@@ -107,10 +144,12 @@ export class LogStore {
     if (!isValidDocId(docId)) return { ok: false, error: "invalid document id" };
     if (!Number.isInteger(from) || from < 0) return { ok: false, error: "invalid offset" };
 
-    const doc = this.docs.get(docId);
+    const doc = this.hydrate(docId);
     if (!doc) {
-      // A doc nobody has written to yet is an empty log, not an error —
-      // from=0 on it is valid and returns nothing.
+      // No in-memory and no on-disk state: either a doc nobody has written
+      // to yet, or (with no dataDir) one whose history eviction dropped.
+      // from=0 is an empty log, not an error; a non-zero offset into
+      // nothing is out of range.
       return from === 0 ? { ok: true, bytes: Buffer.alloc(0) } : { ok: false, error: "offset out of range" };
     }
     if (from > doc.totalBytes) return { ok: false, error: "offset out of range" };
