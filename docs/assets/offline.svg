@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420" role="img" aria-label="Timeline: two replicas exchange edits, the network drops and both keep typing locally, then on reconnect only the missing edits ship and both documents match.">
+  <defs>
+    <style>
+      .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .eyeb { font-size: 12px; letter-spacing: 3px; fill: #f5c518; }
+      .h1   { font-size: 26px; font-weight: 700; fill: #e4e6ea; }
+      .sub  { font-size: 14px; fill: #7d838c; }
+      .lane { font-size: 13px; letter-spacing: 2px; fill: #7d838c; }
+      .note { font-size: 13px; fill: #7d838c; }
+      .cap  { font-size: 12px; letter-spacing: 2px; fill: #f5c518; }
+      .ms   { font-size: 14px; fill: #e4e6ea; }
+    </style>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#454c55"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="420" rx="16" fill="#0b0c0e"/>
+  <rect x="0.5" y="0.5" width="1199" height="419" rx="16" fill="none" stroke="#262a30"/>
+
+  <text class="mono eyeb" x="72" y="54">OFFLINE-FIRST BY CONSTRUCTION</text>
+  <text class="mono h1" x="72" y="90">Pull the cable. Keep typing.</text>
+  <text class="mono sub" x="72" y="116">Nothing in the edit path waits on the network, so losing it is not an error state.</text>
+
+  <rect x="520" y="158" width="300" height="140" rx="10" fill="none" stroke="#454c55" stroke-dasharray="5 5"/>
+  <text class="mono lane" x="670" y="182" text-anchor="middle">NETWORK DROPS</text>
+
+  <text class="mono lane" x="72" y="214">REPLICA A</text>
+  <text class="mono lane" x="72" y="284">REPLICA B</text>
+  <line x1="200" y1="210" x2="1128" y2="210" stroke="#262a30"/>
+  <line x1="200" y1="280" x2="1128" y2="280" stroke="#262a30"/>
+
+  <rect x="250" y="200" width="12" height="20" rx="2" fill="#f5c518"/>
+  <rect x="310" y="200" width="12" height="20" rx="2" fill="#f5c518"/>
+  <rect x="370" y="270" width="12" height="20" rx="2" fill="none" stroke="#7d838c"/>
+  <rect x="430" y="270" width="12" height="20" rx="2" fill="none" stroke="#7d838c"/>
+  <line x1="256" y1="222" x2="256" y2="266" stroke="#454c55" stroke-dasharray="3 3" marker-end="url(#a3)"/>
+  <line x1="316" y1="222" x2="316" y2="266" stroke="#454c55" stroke-dasharray="3 3" marker-end="url(#a3)"/>
+  <line x1="376" y1="268" x2="376" y2="224" stroke="#454c55" stroke-dasharray="3 3" marker-end="url(#a3)"/>
+  <line x1="436" y1="268" x2="436" y2="224" stroke="#454c55" stroke-dasharray="3 3" marker-end="url(#a3)"/>
+
+  <rect x="560" y="200" width="12" height="20" rx="2" fill="#f5c518"/>
+  <rect x="600" y="200" width="12" height="20" rx="2" fill="#f5c518"/>
+  <rect x="640" y="200" width="12" height="20" rx="2" fill="#f5c518"/>
+  <rect x="680" y="200" width="12" height="20" rx="2" fill="#f5c518"/>
+  <rect x="580" y="270" width="12" height="20" rx="2" fill="none" stroke="#7d838c"/>
+  <rect x="640" y="270" width="12" height="20" rx="2" fill="none" stroke="#7d838c"/>
+  <rect x="700" y="270" width="12" height="20" rx="2" fill="none" stroke="#7d838c"/>
+  <text class="mono note" x="560" y="246">edits queue on disk</text>
+
+  <line x1="840" y1="158" x2="840" y2="298" stroke="#f5c518" stroke-opacity="0.55"/>
+  <text class="mono cap" x="850" y="176">RECONNECT</text>
+  <line x1="852" y1="210" x2="900" y2="210" stroke="#454c55" marker-end="url(#a3)"/>
+  <line x1="852" y1="280" x2="900" y2="280" stroke="#454c55" marker-end="url(#a3)"/>
+
+  <rect x="916" y="192" width="212" height="36" rx="7" fill="#131518" stroke="#262a30"/>
+  <rect x="916" y="262" width="212" height="36" rx="7" fill="#131518" stroke="#262a30"/>
+  <g>
+    <rect x="932" y="202" width="12" height="16" rx="2" fill="#f5c518"/><rect x="950" y="202" width="12" height="16" rx="2" fill="none" stroke="#7d838c"/><rect x="968" y="202" width="12" height="16" rx="2" fill="#f5c518"/><rect x="986" y="202" width="12" height="16" rx="2" fill="#f5c518"/><rect x="1004" y="202" width="12" height="16" rx="2" fill="none" stroke="#7d838c"/><rect x="1022" y="202" width="12" height="16" rx="2" fill="#f5c518"/><rect x="1040" y="202" width="12" height="16" rx="2" fill="none" stroke="#7d838c"/>
+    <rect x="932" y="272" width="12" height="16" rx="2" fill="#f5c518"/><rect x="950" y="272" width="12" height="16" rx="2" fill="none" stroke="#7d838c"/><rect x="968" y="272" width="12" height="16" rx="2" fill="#f5c518"/><rect x="986" y="272" width="12" height="16" rx="2" fill="#f5c518"/><rect x="1004" y="272" width="12" height="16" rx="2" fill="none" stroke="#7d838c"/><rect x="1022" y="272" width="12" height="16" rx="2" fill="#f5c518"/><rect x="1040" y="272" width="12" height="16" rx="2" fill="none" stroke="#7d838c"/>
+  </g>
+  <text class="mono note" x="916" y="248" style="fill:#f5c518">same document, both sides</text>
+
+  <line x1="72" y1="336" x2="1128" y2="336" stroke="#262a30"/>
+  <text class="mono ms" x="72" y="368">Edits apply locally first</text>
+  <text class="mono note" x="72" y="390">The relay is never in the path.</text>
+  <text class="mono ms" x="450" y="368">A drop is just a longer gap</text>
+  <text class="mono note" x="450" y="390">Ops queue, the caret keeps moving.</text>
+  <text class="mono ms" x="840" y="368">Reconnect ships a delta</text>
+  <text class="mono note" x="840" y="390">Only what the other side is missing.</text>
+</svg>

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-label="Starling: two people type at once, the document converges, no server decides.">
+  <defs>
+    <style>
+      .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .eyeb { font-size: 13px; letter-spacing: 3px; fill: #7d838c; }
+      .word { font-size: 82px; font-weight: 700; letter-spacing: 12px; fill: #f5c518; }
+      .lede { font-size: 18px; fill: #e4e6ea; }
+      .meta { font-size: 13px; letter-spacing: 1px; fill: #7d838c; }
+      .tag  { font-size: 12px; letter-spacing: 2px; fill: #7d838c; }
+      .pane { font-size: 17px; fill: #e4e6ea; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="340" rx="16" fill="#0b0c0e"/>
+  <rect x="0.5" y="0.5" width="1199" height="339" rx="16" fill="none" stroke="#262a30"/>
+
+  <text class="mono eyeb" x="72" y="92">CRDT TEXT EDITOR · TYPESCRIPT · FROM SCRATCH</text>
+  <text class="mono word" x="72" y="182">STARLING</text>
+
+  <text class="mono lede" x="72" y="226">Two people type at once. The document</text>
+  <path d="M66 238 L185 236 L186 258 L67 260 Z" fill="#f5c518" opacity="0.2"/>
+  <text class="mono lede" x="72" y="254">converges. No server decides the merge.</text>
+
+  <text class="mono meta" x="72" y="292">326 tests · 0 runtime dependencies · 2 CI gates · MIT</text>
+
+  <g>
+    <rect x="700" y="72" width="428" height="86" rx="10" fill="#131518" stroke="#262a30"/>
+    <text class="mono tag" x="724" y="102">REPLICA A</text>
+    <text class="mono pane" x="724" y="134">ollehdlrow</text>
+    <rect x="826" y="120" width="2" height="18" fill="#f5c518">
+      <animate attributeName="opacity" values="1;1;0;0" dur="1.2s" repeatCount="indefinite"/>
+    </rect>
+
+    <rect x="700" y="182" width="428" height="86" rx="10" fill="#131518" stroke="#262a30"/>
+    <text class="mono tag" x="724" y="212">REPLICA B</text>
+    <text class="mono pane" x="724" y="244">ollehdlrow</text>
+    <rect x="826" y="230" width="2" height="18" fill="#f5c518">
+      <animate attributeName="opacity" values="0;0;1;1" dur="1.2s" repeatCount="indefinite"/>
+    </rect>
+
+    <line x1="914" y1="158" x2="914" y2="182" stroke="#262a30" stroke-dasharray="3 4"/>
+    <rect x="910" y="156" width="8" height="8" rx="1" fill="#f5c518">
+      <animate attributeName="y" values="156;174" dur="1.8s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0;1;1;0" dur="1.8s" repeatCount="indefinite"/>
+    </rect>
+    <text class="mono tag" x="944" y="176">OPS, IN ANY ORDER</text>
+  </g>
+</svg>

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="1200" height="440" role="img" aria-label="Cold-open of a 100,000 character document on a log scale: Yjs 4.6ms, Doc 110ms, RgaDoc 365ms, against a 1 second budget, and Doc before the fix at 168,000ms.">
+  <defs>
+    <style>
+      .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .eyeb { font-size: 12px; letter-spacing: 3px; fill: #f5c518; }
+      .h1   { font-size: 26px; font-weight: 700; fill: #e4e6ea; }
+      .sub  { font-size: 14px; fill: #7d838c; }
+      .name { font-size: 14px; fill: #e4e6ea; }
+      .val  { font-size: 14px; font-weight: 700; fill: #e4e6ea; }
+      .note { font-size: 13px; fill: #7d838c; }
+      .cap  { font-size: 12px; letter-spacing: 2px; fill: #f5c518; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="440" rx="16" fill="#0b0c0e"/>
+  <rect x="0.5" y="0.5" width="1199" height="439" rx="16" fill="none" stroke="#262a30"/>
+
+  <text class="mono eyeb" x="72" y="54">BENCHMARKS · INCLUDING THE ONES WE LOSE</text>
+  <text class="mono h1" x="72" y="90">Opening a 100,000 character document</text>
+  <text class="mono sub" x="72" y="116">Log scale, because on a linear one three of these four bars are a single pixel.</text>
+
+  <line x1="738" y1="152" x2="738" y2="356" stroke="#f5c518" stroke-opacity="0.5" stroke-dasharray="5 4"/>
+  <text class="mono cap" x="748" y="166">BUDGET · 1s</text>
+
+  <text class="mono name" x="72" y="204">yjs</text>
+  <rect x="240" y="186" width="110" height="24" rx="4" fill="#3a4048"/>
+  <text class="mono val" x="362" y="204">4.6 ms</text>
+
+  <text class="mono name" x="72" y="254">Doc</text>
+  <rect x="240" y="236" width="339" height="24" rx="4" fill="#f5c518"/>
+  <text class="mono val" x="591" y="254" style="fill:#f5c518">110 ms</text>
+
+  <text class="mono name" x="72" y="304">RgaDoc</text>
+  <rect x="240" y="286" width="425" height="24" rx="4" fill="#3a4048"/>
+  <text class="mono val" x="677" y="304">365 ms</text>
+
+  <text class="mono name" x="72" y="356" style="fill:#7d838c">Doc, before the fix</text>
+  <rect x="240" y="338" width="867" height="24" rx="4" fill="none" stroke="#454c55" stroke-dasharray="4 4"/>
+  <text class="mono val" x="256" y="356" style="fill:#7d838c">168,000 ms</text>
+
+  <line x1="72" y1="392" x2="1128" y2="392" stroke="#262a30"/>
+  <text class="mono note" x="72" y="418">Measured and published while it was still 168 seconds. The fix came after, and kept the number.</text>
+</svg>

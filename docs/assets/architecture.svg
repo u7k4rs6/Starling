@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="1200" height="540" role="img" aria-label="Architecture: demo, editor, provider and crdt run in the browser; the relay is an append-only byte log; a simulator drives the tests. Two CI gates enforce the boundaries.">
+  <defs>
+    <style>
+      .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .eyeb { font-size: 12px; letter-spacing: 3px; fill: #f5c518; }
+      .h1   { font-size: 26px; font-weight: 700; fill: #e4e6ea; }
+      .sub  { font-size: 14px; fill: #7d838c; }
+      .col  { font-size: 12px; letter-spacing: 3px; fill: #5f656d; }
+      .name { font-size: 16px; font-weight: 700; fill: #e4e6ea; }
+      .desc { font-size: 13px; fill: #7d838c; }
+      .gate { font-size: 12px; letter-spacing: 2px; fill: #f5c518; }
+    </style>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#454c55"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="540" rx="16" fill="#0b0c0e"/>
+  <rect x="0.5" y="0.5" width="1199" height="539" rx="16" fill="none" stroke="#262a30"/>
+
+  <text class="mono eyeb" x="72" y="54">SIX PACKAGES · TWO ENFORCED BOUNDARIES</text>
+  <text class="mono h1" x="72" y="90">What each box is not allowed to know</text>
+  <text class="mono sub" x="72" y="116">The dashed walls are scripts in CI. Cross one and the build fails.</text>
+
+  <text class="mono col" x="72" y="152">IN THE BROWSER</text>
+  <text class="mono col" x="632" y="152">ON A SERVER</text>
+
+  <rect x="72" y="166" width="496" height="60" rx="10" fill="#131518" stroke="#262a30"/>
+  <text class="mono name" x="96" y="192">packages/demo</text>
+  <text class="mono desc" x="96" y="212">Two panes, remote cursors, an offline toggle.</text>
+
+  <rect x="72" y="238" width="496" height="60" rx="10" fill="#131518" stroke="#262a30"/>
+  <text class="mono name" x="96" y="264">packages/editor</text>
+  <text class="mono desc" x="96" y="284">ProseMirror steps in, CRDT ops out.</text>
+
+  <rect x="72" y="310" width="496" height="60" rx="10" fill="#131518" stroke="#262a30"/>
+  <text class="mono name" x="96" y="336">packages/provider</text>
+  <text class="mono desc" x="96" y="356">IndexedDB, the sync loop, presence.</text>
+
+  <line x1="320" y1="226" x2="320" y2="234" stroke="#454c55" marker-end="url(#arw)"/>
+  <line x1="320" y1="298" x2="320" y2="306" stroke="#454c55" marker-end="url(#arw)"/>
+  <line x1="320" y1="370" x2="320" y2="398" stroke="#454c55" marker-end="url(#arw)"/>
+
+  <rect x="60" y="404" width="520" height="90" rx="12" fill="none" stroke="#f5c518" stroke-opacity="0.4" stroke-dasharray="6 5"/>
+  <rect x="84" y="394" width="196" height="20" rx="10" fill="#0b0c0e"/>
+  <text class="mono gate" x="96" y="409">GATE 1 · CORE</text>
+  <rect x="80" y="422" width="480" height="56" rx="10" fill="#131518" stroke="#262a30"/>
+  <text class="mono name" x="104" y="446">packages/crdt</text>
+  <text class="mono desc" x="104" y="466">No dependencies. No DOM. No clock.</text>
+
+  <rect x="620" y="284" width="508" height="104" rx="12" fill="none" stroke="#f5c518" stroke-opacity="0.4" stroke-dasharray="6 5"/>
+  <rect x="644" y="274" width="204" height="20" rx="10" fill="#0b0c0e"/>
+  <text class="mono gate" x="656" y="289">GATE 2 · RELAY</text>
+  <rect x="640" y="302" width="468" height="70" rx="10" fill="#131518" stroke="#262a30"/>
+  <text class="mono name" x="664" y="328">packages/relay</text>
+  <text class="mono desc" x="664" y="348">An append-only byte log and a cursor. Zero</text>
+  <text class="mono desc" x="664" y="366">CRDT code: it has never heard of a character.</text>
+
+  <line x1="568" y1="336" x2="632" y2="336" stroke="#454c55" marker-end="url(#arw)"/>
+  <text class="mono desc" x="600" y="322" text-anchor="middle">bytes</text>
+
+  <rect x="640" y="412" width="468" height="78" rx="10" fill="#131518" stroke="#262a30"/>
+  <text class="mono name" x="664" y="440">packages/sim</text>
+  <text class="mono desc" x="664" y="460">Drops, duplicates, reorders, partitions, all</text>
+  <text class="mono desc" x="664" y="478">from a seed. Convergence is proved here.</text>
+  <line x1="632" y1="450" x2="592" y2="450" stroke="#454c55" marker-end="url(#arw)"/>
+
+  <text class="mono sub" x="72" y="518" style="fill:#5f656d">A boundary that lives only in a design doc is a boundary that quietly stops being true.</text>
+</svg>
