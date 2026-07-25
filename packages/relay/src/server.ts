@@ -35,6 +35,28 @@ function setCors(req: IncomingMessage, res: ServerResponse, allowedOrigin: strin
   }
 }
 
+/**
+ * SECURITY §2.3: "the relay allows exactly the demo origin." CORS response
+ * headers alone don't enforce that — they only govern whether a browser
+ * lets script *read the response*. A cross-origin `fetch` that POSTs a
+ * `BufferSource` body with no custom headers is a CORS "simple request", so
+ * it is sent with no preflight and the append *executes on the server*
+ * regardless of whether the response is readable. That is exactly the "any
+ * page on the internet can drive a user's browser into appending to
+ * documents" vector §2.3 names.
+ *
+ * So state-changing requests are rejected server-side when they carry a
+ * mismatched Origin. A missing Origin is allowed: browsers always attach one
+ * to a POST, so no-Origin means a non-browser client (curl, another server,
+ * the Node provider) — and those are already inside the "peers are trusted /
+ * anyone with the link can write" model (SECURITY §1, §4). Origin-checking
+ * defends the browser-CSRF case only, and this is the whole of that defence.
+ */
+function isOriginAllowed(req: IncomingMessage, allowedOrigin: string): boolean {
+  const origin = req.headers.origin;
+  return origin === undefined || origin === allowedOrigin;
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const bytes = Buffer.from(JSON.stringify(body));
   res.writeHead(status, { "Content-Type": "application/json", "Content-Length": bytes.length });
@@ -95,6 +117,13 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, options:
   const docId = decodeURIComponent(match[1]!);
 
   if (req.method === "POST") {
+    // SECURITY §2.3: reject a browser append from any origin but the demo's,
+    // server-side — CORS headers don't stop a no-preflight simple POST from
+    // landing (see isOriginAllowed).
+    if (!isOriginAllowed(req, options.allowedOrigin)) {
+      sendJson(res, 403, { error: "forbidden origin" });
+      return;
+    }
     if (!rateLimiter.allow(clientKey(req))) {
       sendJson(res, 429, { error: "rate limit exceeded" });
       return;

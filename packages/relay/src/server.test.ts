@@ -150,6 +150,46 @@ describe("relay server: CORS (SECURITY §2.3) — exactly the configured origin,
   });
 });
 
+describe("relay server: origin enforcement on writes (SECURITY §2.3, F-3)", () => {
+  it("rejects a POST from a non-matching origin with 403 and does not append", async () => {
+    const base = await start();
+    // A cross-origin browser append with no custom headers is a CORS simple
+    // request: it reaches the server with no preflight. Setting no ACAO on
+    // the response is not enough — the write must be refused outright.
+    const res = await fetch(`${base}/doc/${DOC_A}`, {
+      method: "POST",
+      body: "evil",
+      headers: { Origin: "https://evil.example" },
+    });
+    expect(res.status).toBe(403);
+
+    // Nothing was written — the doc is still empty.
+    const readBack = await fetch(`${base}/doc/${DOC_A}?from=0`);
+    expect(await readBack.text()).toBe("");
+  });
+
+  it("allows a POST from the configured demo origin", async () => {
+    const base = await start();
+    const res = await fetch(`${base}/doc/${DOC_A}`, {
+      method: "POST",
+      body: "hi",
+      headers: { Origin: ALLOWED_ORIGIN },
+    });
+    expect(res.status).toBe(200);
+    const readBack = await fetch(`${base}/doc/${DOC_A}?from=0`);
+    expect(await readBack.text()).toBe("hi");
+  });
+
+  it("allows a POST with no Origin header — a non-browser client (curl, another server)", async () => {
+    const base = await start();
+    // Browsers always attach an Origin to a POST; its absence means a
+    // non-browser client, which is inside the accepted "peers are trusted"
+    // model (SECURITY §1/§4). Origin-checking only ever defends the browser.
+    const res = await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "ok" });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("relay server: rate limiting (SECURITY §2.1)", () => {
   it("returns 429 once the configured append rate is exceeded", async () => {
     const base = await start({ appendRatePerSecond: 2 });
