@@ -37,14 +37,6 @@ function recomputeSizes(node: FugueNode): void {
   node.liveSize = (node.deleted ? 0 : 1) + bucketLiveSize(node.left) + bucketLiveSize(node.right);
 }
 
-function propagateSizesUp(node: FugueNode | null): void {
-  let cur = node;
-  while (cur !== null) {
-    recomputeSizes(cur);
-    cur = cur.parent;
-  }
-}
-
 /**
  * Insert `node` into a (parent, side) sibling bucket at the position its
  * id demands, RGA-style: skip past existing same-bucket siblings with
@@ -217,9 +209,59 @@ function countLiveBefore(forest: FugueNode[], target: FugueNode): number {
 export class Doc extends Sequence<CrdtPayload> {
   private readonly rootChildren: FugueNode[] = [];
   private readonly byId = new Map<string, FugueNode>();
+  /** Set by every `integrate`; cleared by `ensureSizes`. See `ensureSizes`
+   * for why `size`/`liveSize` are refreshed lazily in bulk rather than
+   * walked to the root per op (the S6 cold-open fix, F-8). */
+  private sizesDirty = false;
 
   constructor(replica: ReplicaId) {
     super(replica);
+  }
+
+  /**
+   * Refresh `size`/`liveSize` on every node, once, only if a mutation has
+   * happened since the last read.
+   *
+   * These counters are a derived cache read solely by the visible-index
+   * paths (`nodeAtVisibleIndex`, `liveLength`). `integrate` used to keep them
+   * current by walking from the changed node up to the root on every op
+   * (`propagateSizesUp`), which is O(depth) — and a forward-typed document is
+   * a single-sided chain whose depth equals its length, so replaying n ops
+   * cost O(n²): 168s at 100k characters, the headline S6 cold-open failure
+   * that lost to Yjs by ~36,800x (bench/README, DECISIONS #0026).
+   *
+   * Cold-open is a *batch* — replay the whole op log, then read — and `text`
+   * (that read) uses `inOrderWalk`, which needs no sizes at all. So integrate
+   * now only marks the cache dirty (O(1)); the counters are recomputed in one
+   * post-order pass the next time a visible-index path actually needs them.
+   * Replay-then-read is therefore O(n), and nothing about placement, merge
+   * order, or traversal changed — only *when* the cache is refreshed.
+   *
+   * (This targets the cold-open workload specifically. Interleaving a remote
+   * op with a local visible-index query still recomputes in bulk each time,
+   * so tight interactive-after-remote editing stays super-linear; the
+   * order-statistic-treap-backed structure ARCH §2.5 frames as future work is
+   * what would make *that* incremental too.)
+   */
+  private ensureSizes(): void {
+    if (!this.sizesDirty) return;
+    // Iterative post-order (descendants before ancestors) over the bucket
+    // forest. Explicit stack, not recursion: the tree can be a chain as deep
+    // as the document is long (DECISIONS #0026, the same reason every other
+    // traversal here is iterative).
+    const topDown: FugueNode[] = [];
+    const stack: FugueNode[] = [...this.rootChildren];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      topDown.push(node);
+      for (const child of node.left) stack.push(child);
+      for (const child of node.right) stack.push(child);
+    }
+    // Every ancestor precedes its descendants in `topDown`; walking it in
+    // reverse visits descendants first, so each `recomputeSizes` reads final
+    // child counts.
+    for (let i = topDown.length - 1; i >= 0; i -= 1) recomputeSizes(topDown[i]!);
+    this.sizesDirty = false;
   }
 
   get text(): string {
@@ -258,6 +300,7 @@ export class Doc extends Sequence<CrdtPayload> {
   }
 
   insertLocal(visibleIndex: number, char: string): CrdtOp {
+    this.ensureSizes(); // originForVisibleIndex reads liveSize
     const { l, side } = this.originForVisibleIndex(visibleIndex);
     return this.recordLocalOp({ type: "insert", l, side, char }, l === null ? [] : [l]);
   }
@@ -278,6 +321,7 @@ export class Doc extends Sequence<CrdtPayload> {
   }
 
   deleteLocal(visibleIndex: number): CrdtOp {
+    this.ensureSizes(); // nodeAtVisibleIndex reads liveSize
     const node = nodeAtVisibleIndex(this.rootChildren, visibleIndex);
     if (!node) throw new RangeError(`visible index ${visibleIndex} out of range`);
     const target = toRef(node.id);
@@ -321,6 +365,7 @@ export class Doc extends Sequence<CrdtPayload> {
    * along with it. Only a genuinely empty document has no character at
    * all to anchor to (`id: null`, see `Anchor`). */
   anchorAt(visibleIndex: number): Anchor {
+    this.ensureSizes(); // liveLength / nodeAtVisibleIndex read liveSize
     const length = this.liveLength();
     if (!Number.isInteger(visibleIndex) || visibleIndex < 0 || visibleIndex > length) {
       throw new RangeError(`visible index ${visibleIndex} out of range`);
@@ -356,7 +401,7 @@ export class Doc extends Sequence<CrdtPayload> {
       // (DECISIONS #0010) buffers this op until it is.
       const node = this.nodeForId(op.payload.target);
       node.deleted = true;
-      propagateSizesUp(node);
+      this.sizesDirty = true;
       return;
     }
 
@@ -375,7 +420,7 @@ export class Doc extends Sequence<CrdtPayload> {
       newNode.parent = parent;
     }
 
-    propagateSizesUp(newNode.parent ?? newNode);
+    this.sizesDirty = true;
     this.byId.set(Doc.key(op.id), newNode);
   }
 }

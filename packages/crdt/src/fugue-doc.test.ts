@@ -306,18 +306,14 @@ describe("Doc: no stack overflow on a long single-sided chain (DECISIONS #0026)"
   //
   // Ops are built directly (not via sequential `insertLocal` calls on a
   // live `Doc`, which additionally pay `originForVisibleIndex`'s own
-  // O(depth) search per call) and fed in through `receive()` instead —
-  // but `receive()` isn't free either: `integrate()` calls
-  // `propagateSizesUp` on every op, which walks from the new node to the
-  // tree root, and on a single-sided chain that walk is itself O(depth).
-  // Building an n-character chain this way is therefore O(n²) regardless
-  // of which path builds it (this is *why* `Doc` loses to `ArrayDoc` on
-  // this exact workload shape — bench/README.md; a genuine, already-
-  // accepted-as-out-of-scope-for-Step-15 characteristic, not something
-  // this fix introduced). n is kept at 20,000 — comfortably inside the
-  // "crashes well under 30,000" zone this fix was built against, without
-  // asking every CI run to pay the O(n²) cost a much larger n would cost
-  // for no additional confidence that the fix works.
+  // O(depth) search per call) and fed in through `receive()`. Since F-8,
+  // `receive()`/`integrate()` no longer walks to the root per op — it marks
+  // the size cache dirty (O(1)) and the counters are recomputed in bulk only
+  // when a visible-index path needs them (`ensureSizes`) — so replaying this
+  // chain is O(n), not O(n²). The next test exercises that at a scale the
+  // old per-op `propagateSizesUp` could not survive; this one keeps n at
+  // 20,000 and still exercises the read/append/anchor paths (which do touch
+  // sizes) against a maximally deep chain.
   function forwardChainOps(replica: string, n: number): CrdtOp[] {
     const ops: CrdtOp[] = [];
     let prev: ElemId | null = null;
@@ -349,6 +345,29 @@ describe("Doc: no stack overflow on a long single-sided chain (DECISIONS #0026)"
     const anchor = doc.anchorAt(n - 1);
     expect(doc.resolveAnchor(anchor)).toBe(n - 1);
   });
+
+  // F-8: cold-open is replaying a whole op log then reading — the S6 metric.
+  // With per-op propagateSizesUp this was O(n²): ~168s at 100k characters
+  // (bench/README), the headline Yjs loss. Lazy size maintenance makes the
+  // replay O(n) and the read (`text`, via inOrderWalk) needs no sizes at
+  // all. 100,000 characters is deliberately past the point the old code
+  // could finish in any reasonable time — a generous 10s ceiling that a
+  // ~168s O(n²) replay would blow through, while the linear path lands in
+  // well under a second. The assertion on content is the real check; the
+  // timeout is the complexity guard.
+  it("replays a 100,000-character forward chain (cold-open) in linear time", () => {
+    const n = 100_000;
+    const ops = forwardChainOps("W", n);
+
+    const doc = new Doc("R");
+    for (const op of ops) doc.receive(op); // the cold-open replay
+
+    // The read that cold-open actually performs — no size cache needed.
+    expect(doc.text).toBe("x".repeat(n));
+    // And a size-dependent path still resolves correctly afterwards, proving
+    // the lazily-recomputed counters are right at this scale.
+    expect(doc.resolveAnchor(doc.anchorAt(n))).toBe(n);
+  }, 10_000);
 });
 
 function permutations<T>(arr: T[]): T[][] {
