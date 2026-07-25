@@ -14,7 +14,7 @@
 
 <br/>
 
-A collaborative text editor built on CRDTs, written from scratch in TypeScript. Several people edit one document at once, from different machines, some of them offline, and every copy ends up identical — with no server deciding who wins.
+A collaborative text editor built on CRDTs, written from scratch in TypeScript. Several people edit one document at once, from different machines, some of them offline, and every copy ends up identical, with no server deciding who wins.
 
 Most of what's interesting here is the stuff that usually gets swept under the rug: the version that silently corrupts your document while passing every test, the data structure that took 168 seconds to open a document, the merge rule that makes everyone agree on garbage. All three are still in the repo, each pinned by a test that reproduces its exact failure, and each is the reason the shipping version is built the way it is.
 
@@ -28,12 +28,12 @@ b.receive(a.insertLocal(0, "h"));
 b.receive(a.insertLocal(1, "i"));
 
 a.text; // "hi"
-b.text; // "hi" — same result whatever order the ops arrive in, dupes and drops included
+b.text; // "hi": same result whatever order the ops arrive in, dupes and drops included
 
 // A cursor is a character id plus a side, never an integer offset.
 const cursor = a.anchorAt(1);
 a.insertLocal(0, "!");
-a.resolveAnchor(cursor); // 2 — it followed the character it was attached to
+a.resolveAnchor(cursor); // 2: it followed the character it was attached to
 ```
 
 `npm install starling-crdt` for the core with no editor, relay, or browser attached. It has zero runtime dependencies.
@@ -46,7 +46,7 @@ a.resolveAnchor(cursor); // 2 — it followed the character it was attached to
 
 Every CRDT in this repo converges. Getting replicas to agree is the easy half. The hard half is getting them to agree on the text a human actually typed.
 
-Two people type a word each into the start of a line at the same moment, every keystroke landing to the left of the last. RGA lands on `dollrloewh` — both words shredded together a character at a time. Fugue lands on `ollehdlrow` — each word whole, one after the other. Identical inputs, identical convergence guarantee, and one of them is unusable.
+Two people type a word each into the start of a line at the same moment, every keystroke landing to the left of the last. RGA lands on `dollrloewh`, both words shredded together a character at a time. Fugue lands on `ollehdlrow`, each word whole, one after the other. Identical inputs, identical convergence guarantee, and one of them is unusable.
 
 That gap is the entire reason `Doc` (Fugue) ships and `RgaDoc` stays behind glass as a specimen. The jumble is asserted as a literal string in [`rga-doc.test.ts`](packages/crdt/src/rga-doc.test.ts), because deleting the bug would delete the evidence for why Fugue exists.
 
@@ -59,13 +59,13 @@ That gap is the entire reason `Doc` (Fugue) ships and `RgaDoc` stays behind glas
 | Package | What it does |
 |---|---|
 | [`crdt`](packages/crdt) | The algorithm, shipped as `starling-crdt`. `Doc` (Fugue) is the one you use; `RgaDoc`, `ArrayDoc`, and `NaiveDoc` are kept as reference implementations and benchmarked next to it. No dependencies, no DOM, no clock. |
-| [`editor`](packages/editor) | The ProseMirror binding, plus an undo manager that uses no OT and no `prosemirror-history`. Headless — the whole thing runs in Node. |
+| [`editor`](packages/editor) | The ProseMirror binding, plus an undo manager that uses no OT and no `prosemirror-history`. Headless: the whole thing runs in Node. |
 | [`provider`](packages/provider) | Client glue: IndexedDB persistence, the relay transport, the sync loop, presence. |
 | [`relay`](packages/relay) | An append-only byte log with a cursor. It has no idea what a character or a tombstone is. |
 | [`demo`](packages/demo) | Two editor panes, connection toggles, remote cursors, an offline switch. |
 | [`sim`](packages/sim) | A deterministic network: seeded RNG, virtual clock, a queue that drops, dupes, reorders, and partitions. The convergence proofs run against it. |
 
-Two boundaries in that diagram are load-bearing enough to guard in CI. One keeps the core deterministic — no `Date.now`, no `Math.random`, no DOM, all injected — so the simulator can replay any bug from a seed. The other keeps the relay ignorant: it may not import the CRDT package or so much as mention `ElemId`. Both fail the build, not a linter warning, because a boundary that lives only in a design doc stops being true the first week nobody's looking.
+Two boundaries in that diagram are load-bearing enough to guard in CI. One keeps the core deterministic (no `Date.now`, no `Math.random`, no DOM, all injected) so the simulator can replay any bug from a seed. The other keeps the relay ignorant: it may not import the CRDT package or so much as mention `ElemId`. Both fail the build, not a linter warning, because a boundary that lives only in a design doc stops being true the first week nobody's looking.
 
 <br/>
 
@@ -92,9 +92,9 @@ Open it in two tabs and type into both. Full API in [`packages/crdt/README.md`](
 
 <img src="docs/assets/offline.svg" alt="Timeline: two replicas exchange ops, the network partitions and both keep editing locally, then on rejoin only the missing ops ship and both converge." width="100%">
 
-Edits hit the local document and IndexedDB before anything touches the network, so going offline isn't a failure to recover from — it's just a longer wait until the next sync. There's no outbound queue to reconcile. On reconnect, the two sides compare state vectors and ship only the ops the other is missing, never the whole log.
+Edits hit the local document and IndexedDB before anything touches the network, so going offline isn't a failure to recover from; it's just a longer wait until the next sync. There's no outbound queue to reconcile. On reconnect, the two sides compare state vectors and ship only the ops the other is missing, never the whole log.
 
-The whole thing — arbitrary delivery order, duplicates, drops, partitions that heal — is proved as a property against [`packages/sim`](packages/sim), seeded so any failure replays byte for byte.
+The whole thing (arbitrary delivery order, duplicates, drops, partitions that heal) is proved as a property against [`packages/sim`](packages/sim), seeded so any failure replays byte for byte.
 
 <br/>
 
@@ -102,7 +102,7 @@ The whole thing — arbitrary delivery order, duplicates, drops, partitions that
 
 <img src="docs/assets/bench.svg" alt="Cold-open of a 100,000 character document on a log scale: Yjs 4.6ms, Doc 110ms, RgaDoc 365ms, the 1 second budget, and Doc before the F-8 fix at 168,000ms." width="100%">
 
-Cold-open — replaying a document's whole history, which happens every time anyone opens it — is the number that matters, and it's where the first cut fell apart: **168 seconds** at 100k characters, against a one-second budget. Every integration was walking the tree to the root to keep a size counter fresh, which is quadratic on a document typed front to back. Those counters are a cache nothing reads during replay, so they went lazy. Cold-open is **~110 ms** now.
+Cold-open, replaying a document's whole history, which happens every time anyone opens it, is the number that matters, and it's where the first cut fell apart: **168 seconds** at 100k characters, against a one-second budget. Every integration was walking the tree to the root to keep a size counter fresh, which is quadratic on a document typed front to back. Those counters are a cache nothing reads during replay, so they went lazy. Cold-open is **~110 ms** now.
 
 | At 100k characters | Result |
 |---|---|
@@ -111,7 +111,7 @@ Cold-open — replaying a document's whole history, which happens every time any
 | Memory | ~610 bytes/char live, ~858 fully tombstoned |
 | 60k deletions on the wire | 15 bytes |
 
-Yjs is still faster on read and much tighter on the wire, and the local write path is still super-linear — the read fix didn't touch it. The method, the machine caveats, and every number that loses are in [`bench/README.md`](bench/README.md).
+Yjs is still faster on read and much tighter on the wire, and the local write path is still super-linear; the read fix didn't touch it. The method, the machine caveats, and every number that loses are in [`bench/README.md`](bench/README.md).
 
 <br/>
 
@@ -122,7 +122,7 @@ Yjs is still faster on read and much tighter on the wire, and the local write pa
 | Class | Verdict | Kept to show |
 |---|---|---|
 | `NaiveDoc` | diverges | Two concurrent inserts at one index disagree. The mistake almost everyone makes first. |
-| `ArrayDoc` | correct, unusable | A right merge over an array. O(n) per op — fine at every size you'd never actually reach. |
+| `ArrayDoc` | correct, unusable | A right merge over an array. O(n) per op, fine at every size you'd never actually reach. |
 | `RgaDoc` | correct, interleaves | A treap makes it O(log n) and the fastest to open. It still shreds concurrent runs. |
 | `Doc` | ships | Fugue. Fixes the shredding, meets the budget, loses on wire size. One `while` loop from `RgaDoc`. |
 
@@ -132,11 +132,11 @@ Yjs is still faster on read and much tighter on the wire, and the local write pa
 
 The build shipped with 289 tests. A correctness and security pass took it to 328 and found, among other things:
 
-- **Placement by a bare counter** put a new joiner's text in the wrong spot — everyone agreed, on the wrong answer. Convergence had always held; intention hadn't. A Lamport clock in the id fixed it, and the suite had never been checking intention in the first place, which is why it slipped through 1,500 property runs.
+- **Placement by a bare counter** put a new joiner's text in the wrong spot, so everyone agreed on the wrong answer. Convergence had always held; intention hadn't. A Lamport clock in the id fixed it, and the suite had never been checking intention in the first place, which is why it slipped through 1,500 property runs.
 - **Reload reused character ids.** Replaying a saved log restarted the id counter from zero, so the next edit collided with a live id and vanished.
 - **The relay could hand back an evicted document as empty** and then desync on the next write.
 
-`starling-crdt@0.1.0` is on npm with provenance. Cursors survive edits above them, undo is correct under concurrent remote edits, and the relay still contains zero lines that know what a CRDT is — all checked in CI. The full log, including the findings that were measured and deliberately left unfixed, is in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+`starling-crdt@0.1.0` is on npm with provenance. Cursors survive edits above them, undo is correct under concurrent remote edits, and the relay still contains zero lines that know what a CRDT is, all checked in CI. The full log, including the findings that were measured and deliberately left unfixed, is in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 <br/>
 
@@ -148,8 +148,8 @@ Rich text past ProseMirror's basic schema, authentication, multi-document worksp
 
 ## Reading further
 
-- [`docs/01-PRD.md`](docs/01-PRD.md) — what it is and the success criteria it was held to
-- [`docs/02-ARCHITECTURE.md`](docs/02-ARCHITECTURE.md) — the algorithm, the wire format, the sync protocol
-- [`docs/03-SECURITY.md`](docs/03-SECURITY.md) — the trust model, and what's left out of it
-- [`docs/04-FRONTEND.md`](docs/04-FRONTEND.md) — the editor binding and the demo
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — every decision in order, reversals included
+- [`docs/01-PRD.md`](docs/01-PRD.md): what it is and the success criteria it was held to
+- [`docs/02-ARCHITECTURE.md`](docs/02-ARCHITECTURE.md): the algorithm, the wire format, the sync protocol
+- [`docs/03-SECURITY.md`](docs/03-SECURITY.md): the trust model, and what's left out of it
+- [`docs/04-FRONTEND.md`](docs/04-FRONTEND.md): the editor binding and the demo
+- [`docs/DECISIONS.md`](docs/DECISIONS.md): every decision in order, reversals included
