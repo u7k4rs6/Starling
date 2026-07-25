@@ -200,6 +200,40 @@ describe("relay server: rate limiting (SECURITY §2.1)", () => {
     expect(r2.status).toBe(200);
     expect(r3.status).toBe(429);
   });
+
+  // F-3: with trustedProxyDepth set, the per-IP limit follows the real
+  // client from X-Forwarded-For instead of collapsing to one shared limit at
+  // the proxy's single socket address (all requests here share 127.0.0.1).
+  it("with trustedProxyDepth, rate limits per X-Forwarded-For client, not per socket peer", async () => {
+    const base = await start({ appendRatePerSecond: 1, trustedProxyDepth: 1 });
+    const post = (clientIp: string) =>
+      fetch(`${base}/doc/${DOC_A}`, {
+        method: "POST",
+        body: "x",
+        headers: { "X-Forwarded-For": clientIp },
+      });
+
+    // Client 1.1.1.1 spends its single-request budget, then is limited.
+    expect((await post("1.1.1.1")).status).toBe(200);
+    expect((await post("1.1.1.1")).status).toBe(429);
+    // Client 2.2.2.2 has its own budget — it is not affected by 1.1.1.1.
+    expect((await post("2.2.2.2")).status).toBe(200);
+  });
+
+  it("by default (trustedProxyDepth 0) ignores X-Forwarded-For, so it can't be used to dodge the limit", async () => {
+    const base = await start({ appendRatePerSecond: 1 });
+    const post = (clientIp: string) =>
+      fetch(`${base}/doc/${DOC_A}`, {
+        method: "POST",
+        body: "x",
+        headers: { "X-Forwarded-For": clientIp },
+      });
+
+    // Every request shares the same socket peer; a spoofed, ever-changing
+    // XFF must not each get a fresh budget.
+    expect((await post("1.1.1.1")).status).toBe(200);
+    expect((await post("9.9.9.9")).status).toBe(429);
+  });
 });
 
 describe("relay server: round-trips opaque bytes without interpreting them (ARCH §5)", () => {

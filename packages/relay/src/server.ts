@@ -16,15 +16,46 @@ export type RelayOptions = {
   maxConnectionsPerIp?: number;
   appendRatePerSecond?: number;
   idleTimeoutMs?: number;
+  /**
+   * How many reverse proxies sit in front of the relay. 0 (default) trusts
+   * only the socket peer and ignores `X-Forwarded-For` entirely. Set it to
+   * the real hop count on a platform that terminates TLS / load-balances in
+   * front of this process (Fly.io, Render, Railway, a CDN), so SECURITY
+   * §2.1's per-IP append limit is applied to the real client rather than
+   * collapsing to one shared limit at the proxy's single address. Only raise
+   * it when the fronting proxies are trusted to append (not pass through) a
+   * client-supplied XFF — see `clientKey`.
+   */
+  trustedProxyDepth?: number;
 };
 
 const DOC_PATH_RE = /^\/doc\/([^/?]+)\/?$/;
 
-function clientKey(req: IncomingMessage): string {
-  // Real deployments sit behind a proxy that sets X-Forwarded-For; using
-  // the raw socket address here is the honest v1 behavior (ARCH §5 names
-  // no reverse-proxy trust model), not a placeholder.
-  return req.socket.remoteAddress ?? "unknown";
+/**
+ * The rate-limit identity for a request. With `trustedProxyDepth` 0 (the
+ * default) this is the socket peer address and nothing else — `X-Forwarded-
+ * For` is attacker-controlled, so honouring it unconditionally would let
+ * anyone forge their rate-limit identity with a header, which is strictly
+ * worse than the proxy-collapse it would fix. Only when the operator has
+ * declared how many trusted proxies front the relay do we read XFF, and even
+ * then never past the furthest address those hops vouch for.
+ */
+function clientKey(req: IncomingMessage, trustedProxyDepth: number): string {
+  const socketAddr = req.socket.remoteAddress ?? "unknown";
+  if (trustedProxyDepth <= 0) return socketAddr;
+  const raw = req.headers["x-forwarded-for"];
+  const forwarded = (Array.isArray(raw) ? raw.join(",") : raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  // Addresses nearest-to-farthest from the server: the socket peer, then the
+  // XFF chain read right-to-left (each proxy appends the address it received
+  // from). The real client sits `trustedProxyDepth` hops out. Clamp so a
+  // short or absent XFF falls back to the furthest still-trusted address
+  // instead of reading a forgeable, client-supplied entry beyond it.
+  const nearestFirst = [socketAddr, ...forwarded.reverse()];
+  const index = Math.min(trustedProxyDepth, nearestFirst.length - 1);
+  return nearestFirst[index]!;
 }
 
 function setCors(req: IncomingMessage, res: ServerResponse, allowedOrigin: string): void {
@@ -124,7 +155,7 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, options:
       sendJson(res, 403, { error: "forbidden origin" });
       return;
     }
-    if (!rateLimiter.allow(clientKey(req))) {
+    if (!rateLimiter.allow(clientKey(req, options.trustedProxyDepth ?? 0))) {
       sendJson(res, 429, { error: "rate limit exceeded" });
       return;
     }
@@ -188,6 +219,12 @@ export function createRelayServer(options: RelayOptions): Server {
   });
 
   server.on("connection", (socket: Socket) => {
+    // Connection limiting is necessarily keyed on the socket peer: at
+    // TCP-accept time no HTTP headers have been parsed, so X-Forwarded-For
+    // is unavailable here (unlike the per-request rate limit, which can use
+    // it via `trustedProxyDepth`). Behind a proxy this is a per-proxy cap
+    // rather than per-client — a coarser but still-real socket-exhaustion
+    // guard, and the proxy itself typically bounds fan-in too.
     const key = socket.remoteAddress ?? "unknown";
     if (!connectionLimiter.tryAcquire(key)) {
       socket.destroy();
