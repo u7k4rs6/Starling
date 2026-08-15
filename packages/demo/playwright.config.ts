@@ -1,10 +1,11 @@
 import { defineConfig } from "@playwright/test";
 
 /**
- * Verifies the actual FRONTEND §5 acceptance criteria (F3-F7) and the
- * three demonstrations (§2.3) against a real browser — this repo has
- * Chromium pre-installed, so "the demo works" is checked directly rather
- * than only inferred from unit tests of its pieces.
+ * Verifies the deployed demo against a real browser: concurrent convergence,
+ * the cut-link diverge-then-reconverge with no dialog, undo isolation, and the
+ * share handoff over the dev relay. Needs a Chromium binary at the path below;
+ * CI does not run this suite (see .github/workflows/ci.yml), it is a local and
+ * pre-deploy check.
  */
 export default defineConfig({
   testDir: "./e2e",
@@ -29,9 +30,6 @@ export default defineConfig({
       command: "pnpm exec vite --port 5173 --strictPort",
       url: "http://127.0.0.1:5173",
       reuseExistingServer: false,
-      // A short TTL so the F7 (stale cursor fade) e2e test doesn't sit
-      // through the real 5s production default — see config.ts.
-      env: { VITE_AWARENESS_TTL_MS: "1200" },
     },
   ],
 });

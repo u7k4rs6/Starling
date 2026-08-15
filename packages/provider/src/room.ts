@@ -7,8 +7,14 @@
  * 2. It is formatted in the 8-4-4-4-12 hex shape the relay validates. The relay
  *    checks the shape, not the RFC-4122 version and variant nibbles, so all 128
  *    bits stay random rather than the 122 a v4 UUID would leave.
- * 3. It travels in the URL fragment, never the query string, so it is not sent
- *    to the server and never lands in Pages access logs or referrer headers.
+ * 3. It travels in the URL fragment, never the query string. A fragment is not
+ *    sent in any HTTP request, so the id stays out of the GitHub Pages access
+ *    logs and out of referrer headers to third parties. It does NOT hide the id
+ *    from the relay: the relay receives it as a path segment in
+ *    `POST /doc/:id`, and the host (Render) logs request paths, so a room id is
+ *    visible to whoever runs the relay. That is unavoidable, since the relay
+ *    needs the id to route, and acceptable, since the relay is exactly the party
+ *    a room is being shared through.
  */
 const ROOM_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 

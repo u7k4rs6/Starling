@@ -22,7 +22,7 @@ export class Provider {
   private constructor(
     private readonly _doc: Doc,
     private readonly persistence: Persistence,
-    private readonly transport: RelayTransport,
+    private transport: RelayTransport,
     lastPushedVector: StateVector,
     relayReadOffset: number
   ) {
@@ -132,6 +132,37 @@ export class Provider {
     const result = this.syncChain.then(() => this.syncNow());
     // The chain swallows failures so one bad sync doesn't reject every future
     // one; the returned promise still rejects for *this* caller.
+    this.syncChain = result.catch(() => undefined);
+    return result;
+  }
+
+  /**
+   * Move this replica onto a different transport, then reconcile against it.
+   * The demo does this when a visitor who has been editing in local-only mode
+   * clicks share: the document already holds all their ops, but the read
+   * cursor and the last-pushed vector are relative to the old (local) log and
+   * mean nothing in the new one, which may be empty or already hold an
+   * unrelated history at different offsets.
+   *
+   * So the handoff resets both: the read cursor to 0, to read the new log from
+   * the start, and the last-pushed vector to empty, so `missingFrom` re-derives
+   * every local op as owed to the new transport. The follow-up sync then pulls
+   * whatever the new log already contains (nothing, or someone else's history)
+   * and pushes the whole local history across. Convergence and idempotence do
+   * the rest: no op is lost (all are re-offered) and none is double-applied
+   * (receive dedupes by id, and the wire log only appends).
+   *
+   * Routed through the same chain as `sync()` so it cannot interleave with an
+   * in-flight poll and read a cursor that is about to be reset out from under
+   * it. Resolves once the reconciling sync has completed.
+   */
+  switchTransport(transport: RelayTransport): Promise<void> {
+    const result = this.syncChain.then(async () => {
+      this.transport = transport;
+      this.relayReadOffset = 0;
+      this.lastPushedVector = new Map();
+      await this.syncNow();
+    });
     this.syncChain = result.catch(() => undefined);
     return result;
   }

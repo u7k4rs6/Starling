@@ -1,19 +1,23 @@
-/* FRONTEND §3: "network instrument, not a document app" — near-
-   monochrome shell; colour carries exactly one meaning (replica
-   identity, via --replica-color, set per pane in EditorPane.tsx);
-   connection state is form (dot filled/hollow), never colour; almost no
-   motion, with the whole animation budget spent on the convergence
-   moment. Self-hosted fonts only (SECURITY §1's no-third-party-requests
-   rule reaches typography too — no Google Fonts CDN). */
+/* Deploy demo theme: warm and yellow, mobile first. The original in-app
+   shell (FRONTEND section 3) was near monochrome; the public demo trades that
+   for a friendlier, higher contrast look a recruiter can read on a phone in a
+   few seconds. Colour still carries meaning: the two replicas keep their two
+   identity colours (--replica, set per pane), and convergence is the one thing
+   the accent yellow is spent on. Self hosted fonts only. */
 
 :root {
-  --bg: #0b0c0e;
-  --panel: #131518;
-  --border: #2a2d32;
-  --text: #e4e6ea;
-  --text-dim: #8a8f98;
+  --bg: #fbf6e9;
+  --bg-sunk: #f3ead2;
+  --card: #fffdf7;
+  --ink: #1f1b16;
+  --ink-dim: #7a7161;
+  --line: #e4d8bd;
+  --accent: #f4c20d;
+  --accent-ink: #3a2f05;
+  --good: #2f8f5b;
+  --warn: #c2622a;
   --mono: "JetBrains Mono", ui-monospace, monospace;
-  --display: "Space Grotesk", sans-serif;
+  --display: "Space Grotesk", system-ui, sans-serif;
 }
 
 * {
@@ -23,184 +27,304 @@
 html,
 body,
 #root {
-  height: 100%;
+  min-height: 100%;
   margin: 0;
 }
 
 body {
   background: var(--bg);
-  color: var(--text);
+  color: var(--ink);
   font-family: var(--display);
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
 }
 
 .app {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.1rem 1rem 3rem;
 }
 
+/* Header */
 .app-header {
+  padding: 0.4rem 0 1rem;
+}
+
+.brand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.6rem 1rem;
-  border-bottom: 1px solid var(--border);
+  gap: 0.55rem;
 }
 
-.app-title {
+.brand-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--accent-ink);
+}
+
+.brand-name {
   font-family: var(--mono);
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  font-size: 0.9rem;
-  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
 }
 
-.third-replica-button {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-family: var(--display);
-  font-size: 0.78rem;
-  padding: 0.35rem 0.7rem;
-  border-radius: 3px;
-  cursor: pointer;
+.tagline {
+  margin: 0.7rem 0 0;
+  max-width: 46ch;
+  color: var(--ink-dim);
+  font-size: 0.98rem;
 }
 
-.third-replica-button:hover {
-  color: var(--text);
-  border-color: var(--text-dim);
-}
-
+/* Panes: stacked on phones, side by side once there is room */
 .panes {
-  flex: 1;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  min-height: 0;
-}
-
-.panes-solo {
   grid-template-columns: 1fr;
+  gap: 0.75rem;
 }
 
-.editor-pane {
+.pane {
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--border);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 168px;
 }
 
-.editor-pane:last-child {
-  border-right: none;
-}
-
-.editor-pane-header {
+.pane-head {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0.8rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunk);
 }
 
-.replica-label {
+.pane-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--replica, var(--ink));
+}
+
+.pane-label {
   font-family: var(--mono);
   font-weight: 500;
-  color: var(--replica-color, var(--text));
+  color: var(--replica, var(--ink));
 }
 
-/* Connection state is drawn as filled vs hollow — form, not hue
-   (FRONTEND §3): the dot always uses --replica-color, online/offline is
-   told apart by fill alone. */
-.connection-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1.5px solid var(--replica-color, var(--text-dim));
+.pane-pending {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
 }
 
-.connection-dot.online {
-  background: var(--replica-color, var(--text-dim));
-}
-
-.connection-dot.offline {
-  background: transparent;
-}
-
-.editor-surface {
+.pane-surface {
   flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 1rem;
+  min-height: 120px;
+  padding: 0.85rem 0.9rem;
   font-family: var(--mono);
   font-size: 0.95rem;
   line-height: 1.6;
+  overflow: auto;
 }
 
-.editor-surface .ProseMirror {
+.pane-surface .ProseMirror {
   outline: none;
   min-height: 100%;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.remote-cursor {
-  position: relative;
-  border-left: 2px solid var(--cursor-color);
-  margin-left: -1px;
-}
-
-.remote-cursor-label {
-  position: absolute;
-  top: -1.15em;
-  left: -2px;
-  font-family: var(--mono);
-  font-size: 0.62rem;
-  color: #0b0c0e;
-  background: var(--cursor-color);
-  padding: 0 3px;
-  border-radius: 2px;
-  white-space: nowrap;
-  /* Almost no motion in this UI (FRONTEND §3) — the one exception is the
-     convergence moment on the pending counter, not this label. */
-}
-
-.editor-pane-footer {
+/* Convergence status */
+.status {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.5rem 0.8rem;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--text-dim);
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  margin: 0.85rem 0 0;
+  padding: 0.7rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
 }
 
-.connection-toggle {
+.status-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+
+.status-converged .status-dot {
+  background: var(--good);
+}
+
+.status-diverged .status-dot {
+  background: var(--warn);
+}
+
+.status-text {
+  font-family: var(--mono);
+  font-weight: 500;
+}
+
+.status-converged .status-text {
+  color: var(--good);
+}
+
+.status-diverged .status-text {
+  color: var(--warn);
+}
+
+.status-detail {
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+/* Controls */
+.controls {
+  margin-top: 0.85rem;
+  padding: 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-sunk);
+  display: grid;
+  gap: 0.7rem;
+}
+
+.controls-row {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.link-toggle {
+  flex: 1;
+  min-width: 130px;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.85rem;
   cursor: pointer;
-  user-select: none;
 }
 
-.pending-counter {
+.link-toggle:hover {
+  border-color: var(--ink-dim);
+}
+
+.link-toggle.is-cut {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #fff;
+}
+
+.slider {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr 3.2rem;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.slider-label {
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+.slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.slider-value {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-/* The whole animation budget (FRONTEND §3): the pending counter gets a
-   brief highlight exactly when it drains to zero — the convergence
-   moment — and nothing else in this UI animates. */
-.pending-counter.just-converged {
-  animation: converge-flash 900ms ease-out;
+/* Share */
+.share {
+  margin-top: 1rem;
+  text-align: center;
 }
 
-@keyframes converge-flash {
-  0% {
-    color: var(--replica-color, var(--text));
+.share-button {
+  width: 100%;
+  max-width: 22rem;
+  padding: 0.75rem 1rem;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.share-button:hover {
+  filter: brightness(0.96);
+}
+
+.share-row {
+  display: flex;
+  gap: 0.5rem;
+  max-width: 34rem;
+  margin: 0 auto;
+}
+
+.share-url {
+  flex: 1;
+  min-width: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+.share-copy {
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--accent-ink);
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.share-note {
+  margin: 0.6rem auto 0;
+  max-width: 44ch;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+}
+
+@media (min-width: 720px) {
+  body {
+    font-size: 16px;
   }
-  100% {
-    color: var(--text-dim);
+  .app {
+    padding: 2rem 1.5rem 4rem;
+  }
+  .panes {
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+  .pane {
+    min-height: 240px;
   }
 }
