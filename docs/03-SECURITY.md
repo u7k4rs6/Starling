@@ -52,7 +52,7 @@ The relay is a public endpoint that accepts unauthenticated appends — a delibe
 | Max docs | 10,000 | LRU-evict the oldest beyond this. It is a demo. |
 | Max connections per IP | 20 | Blunt, but stops the laziest exhaustion. |
 | Append rate limit per IP | 100/sec | Well above a human typist, well below a script. |
-| Idle connection timeout | 5 min | Reclaim sockets. |
+| Idle connection timeout | 5 min | Reclaim idle HTTP connections. |
 
 These are **hard limits with explicit errors**, not soft warnings — a limit that logs and continues is not a limit. Behind a reverse proxy the per-IP rate limit reads the real client address from a trusted `X-Forwarded-For`, opt-in, so it stays per-client rather than collapsing to one shared limit at the proxy's address (finding F-3).
 

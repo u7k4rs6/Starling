@@ -10,7 +10,7 @@ Starling is a real-time collaborative text editor built on CRDTs, written from s
 
 The project began under the name Palimpsest and reached roughly three-quarters of its planned scope before that build was lost. The code was unrecoverable; the design decisions were not, and they are reproduced across these documents. Several are counterintuitive — each was reached by building the obvious thing first, measuring or probing it, and watching it fail. Where a decision reads as surprising, [§2 of the architecture doc](02-ARCHITECTURE.md) gives the evidence that produced it.
 
-The value of the project lives in the parts that are hard. A CRDT collaborative editor is easy to mistake for a tutorial exercise — a last-write-wins array over a WebSocket — but that version is worthless: it diverges the moment two people edit at once. Everything worth reading here is in avoiding that failure and proving it was avoided.
+The value of the project lives in the parts that are hard. A CRDT collaborative editor is easy to mistake for a tutorial exercise, a last-write-wins array that merges edits by position, but that version is worthless: it diverges the moment two people edit at once. Everything worth reading here is in avoiding that failure and proving it was avoided.
 
 ---
 
