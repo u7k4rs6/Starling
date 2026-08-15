@@ -61,6 +61,12 @@ export class ControllableTransport implements RelayTransport {
     this.link = { ...this.link, ...patch };
   }
 
+  /** Pass the inner transport's generation token straight through, so a
+   * relay restart is still observable when the demo wraps the relay in this. */
+  generation(): string | undefined {
+    return this.inner.generation?.();
+  }
+
   async append(bytes: Uint8Array): Promise<number> {
     if (!this.link.connected) throw new Error("link partitioned");
     if (this.link.dropRate > 0 && this.random() < this.link.dropRate) {

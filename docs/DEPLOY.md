@@ -29,16 +29,46 @@ Required environment variables (`packages/relay/scripts/serve.mjs`):
 - `RELAY_DATA_DIR` — optional; set it to a persistent volume/disk path
   if the host's filesystem doesn't survive restarts, so the op log
   survives a redeploy. Omit it and the relay still works, just with an
-  empty log after every restart.
+  empty log after every restart. A restart with an empty log is no longer
+  a hazard: the relay stamps every response with a per-boot generation
+  token, and a client that sees it change reconciles against the fresh
+  log and re-pushes its history (DECISIONS #0031). So on a host with no
+  persistent disk you can leave this unset.
+- `RELAY_TRUSTED_PROXY_DEPTH` — how many trusted proxies front the
+  process, default `0`. Behind a platform that terminates TLS and load-
+  balances (Render, a CDN), set it to the real hop count or the per-IP
+  append limit collapses to the proxy's single address and every visitor
+  shares one budget (DECISIONS #0032). On Render, set it to `1`.
 
-Example, any container host:
+The relay also serves `GET /health` (200 with a small JSON body). Use it
+for a manual liveness check. Do NOT wire an uptime monitor to ping it on
+a free host: a scheduled ping is inbound traffic that resets the 15-minute
+spin-down timer and keeps the instance awake around the clock, burning the
+750 instance-hours the demo's wake-on-intent design protects.
+
+### On Render (the free tier this demo targets)
+
+`render.yaml` at the repo root is a Blueprint for exactly this: a free
+Docker web service built from `packages/relay/Dockerfile`, with
+`RELAY_TRUSTED_PROXY_DEPTH=1` already set and `RELAY_ALLOWED_ORIGIN` left
+for you to fill in. New → Blueprint, point Render at the repo, then set
+`RELAY_ALLOWED_ORIGIN` to `https://<owner>.github.io` in the dashboard.
+The Blueprint sets no `healthCheckPath`, on purpose (see the file's
+comment): a free service sleeps after 15 minutes idle and wakes in about
+a minute on the next request, which the local-first demo hides by never
+depending on the relay until a visitor shares.
+
+Example, any other container host:
 
 ```
 docker build -f packages/relay/Dockerfile -t starling-relay .
-docker run -p 8787:8787 -e RELAY_ALLOWED_ORIGIN=https://<owner>.github.io starling-relay
+docker run -p 8787:8787 \
+  -e RELAY_ALLOWED_ORIGIN=https://<owner>.github.io \
+  -e RELAY_TRUSTED_PROXY_DEPTH=1 \
+  starling-relay
 ```
 
-Once it's up, note its public URL (e.g. `https://starling-relay.fly.dev`)
+Once it's up, note its public URL (e.g. `https://starling-relay.onrender.com`)
 — the demo needs it next.
 
 ## 2. Enable GitHub Pages (one-time, repo admin only)

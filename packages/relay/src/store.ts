@@ -8,9 +8,16 @@ import * as path from "node:path";
  * offset. It does not know what a CRDT is.
  */
 
-export const MAX_MESSAGE_BYTES = 1 * 1024 * 1024; // 1 MB (SECURITY §2.1)
-export const MAX_LOG_BYTES_PER_DOC = 50 * 1024 * 1024; // 50 MB
-export const MAX_DOCS = 10_000;
+// Caps sized so the pathological worst case fits the free host's 512 MB of
+// RAM, not just typical use (a demo doc is a few KB). Worst case is every
+// resident doc frozen at its max: MAX_DOCS * MAX_LOG_BYTES_PER_DOC = 128 * 2 MB
+// = 256 MB of log bytes. A read copies one doc's log via Buffer.concat (a
+// transient up to 2 MB per concurrent read, tens of MB under load), and Node
+// itself wants ~100-150 MB, so the total lands near 420 MB with headroom under
+// 512. See DECISIONS #0032 for the full arithmetic and the doc-count reasoning.
+export const MAX_MESSAGE_BYTES = 1 * 1024 * 1024; // 1 MB per append (SECURITY §2.1); big enough that a paste never wedges a client
+export const MAX_LOG_BYTES_PER_DOC = 2 * 1024 * 1024; // 2 MB per doc: ~200k characters, far past any demo document
+export const MAX_DOCS = 128; // resident-doc ceiling; the LRU drops the coldest beyond this
 
 // Document ids are capabilities (SECURITY §1): a CSPRNG UUID, never
 // sequential, never derived from anything guessable. This regex is the

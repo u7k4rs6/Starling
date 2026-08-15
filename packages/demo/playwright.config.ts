@@ -14,10 +14,10 @@ export default defineConfig({
   timeout: 30_000,
   use: {
     baseURL: "http://127.0.0.1:5173",
-    // Environment ships a pinned Chromium; using it directly (see
-    // AGENTS/system notes) rather than triggering Playwright's own
-    // browser download, which this sandbox has no route to.
-    launchOptions: { executablePath: "/opt/pw-browsers/chromium" },
+    // Point at a system Chrome/Chromium binary rather than a Playwright-managed
+    // download (Playwright has no build for this OS). Override with
+    // PW_CHROME_PATH if the binary lives elsewhere.
+    launchOptions: { executablePath: process.env.PW_CHROME_PATH ?? "/usr/bin/google-chrome" },
   },
   webServer: [
     {

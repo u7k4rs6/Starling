@@ -1,0 +1,38 @@
+# Render Blueprint for the Starling relay (deploy Phase 3). A free Docker web
+# service built from packages/relay/Dockerfile.
+#
+# Deliberately NO healthCheckPath. On Render's free tier any inbound request
+# resets the 15-minute spin-down timer, so a health check pinged on a schedule
+# would keep the instance awake around the clock and burn the 750 instance-hours
+# the wake-on-intent design exists to protect (DECISIONS #0029). The relay still
+# serves GET /health for a manual check; just do not point an uptime monitor at
+# it. The relay holds its log in memory only (Render free has no persistent
+# disk), and that is fine: a spin-down and restart is handled by the generation
+# token, which makes clients reconcile against the fresh log (DECISIONS #0031).
+services:
+  - type: web
+    name: starling-relay
+    runtime: docker
+    plan: free
+    dockerfilePath: ./packages/relay/Dockerfile
+    dockerContext: .
+    # A redeploy restarts the process and clears the in-memory log, so keep it a
+    # deliberate action rather than a side effect of every push to main. Clients
+    # recover either way (the generation token), but a demo redeploy is still a
+    # visible event, like the demo's own manual-dispatch deploy.
+    autoDeploy: false
+    envVars:
+      # The exact origin the demo is served from, e.g. https://<owner>.github.io
+      # (scheme + host, no path). Set in the dashboard; no default in production
+      # on purpose, so a misconfigured relay refuses to start rather than
+      # allowing every origin (SECURITY section 2.3).
+      - key: RELAY_ALLOWED_ORIGIN
+        sync: false
+      # Render terminates TLS at one edge proxy and appends the real client IP
+      # to X-Forwarded-For. Depth 1 makes the per-IP append limit apply to the
+      # real client; left at 0, every visitor would collapse to the proxy's one
+      # address and share a single budget (DECISIONS #0032).
+      - key: RELAY_TRUSTED_PROXY_DEPTH
+        value: "1"
+      - key: NODE_ENV
+        value: production

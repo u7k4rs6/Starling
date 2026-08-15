@@ -14,6 +14,10 @@ import type { RelayTransport } from "./transport.js";
 export class Provider {
   private lastPushedVector: StateVector;
   private relayReadOffset: number;
+  /** The relay generation token seen on the last sync, or undefined before the
+   * first response (or on a transport that has no generation, e.g. the local
+   * hub). A change means the relay restarted onto a fresh log. */
+  private knownGeneration: string | undefined = undefined;
   /** Serialises `sync()` — see the method for why overlapping runs corrupt
    * the read cursor. Same one-promise-chain shape `IndexedDbPersistence`
    * uses to force strict call-order execution. */
@@ -161,6 +165,9 @@ export class Provider {
       this.transport = transport;
       this.relayReadOffset = 0;
       this.lastPushedVector = new Map();
+      // The new transport has its own (or no) generation; forget the old one so
+      // the first sync adopts it fresh instead of mistaking it for a restart.
+      this.knownGeneration = undefined;
       await this.syncNow();
     });
     this.syncChain = result.catch(() => undefined);
@@ -177,8 +184,53 @@ export class Provider {
    * full vector also covers this replica's own not-yet-pushed local
    * edits, which still need to go out.
    */
+  /**
+   * Notice a relay restart and reconcile against the fresh log. The transport
+   * reports the log instance's generation token; when it changes, our read
+   * cursor points into a log that no longer exists and our last-pushed vector
+   * claims a history the new log never received. Reset both, exactly as
+   * `switchTransport` does, so the next read starts from the new log's beginning
+   * and the next push re-offers our whole local history. CRDT receive dedupes,
+   * so replaying it costs nothing but bytes.
+   *
+   * Returns true when a reset happened. On the first generation seen, and when
+   * the transport has no generation at all (the local hub), it just records and
+   * returns false.
+   */
+  private adoptGenerationAndMaybeReset(): boolean {
+    const generation = this.transport.generation?.();
+    if (generation === undefined) return false;
+    if (this.knownGeneration === undefined) {
+      this.knownGeneration = generation;
+      return false;
+    }
+    if (generation === this.knownGeneration) return false;
+    this.knownGeneration = generation;
+    this.relayReadOffset = 0;
+    this.lastPushedVector = new Map();
+    return true;
+  }
+
   private async syncNow(): Promise<void> {
-    const pulled = await this.transport.read(this.relayReadOffset);
+    let pulled: Uint8Array;
+    try {
+      pulled = await this.transport.read(this.relayReadOffset);
+    } catch (err) {
+      // A read can fail because the relay restarted onto a fresh log and our
+      // cursor is now past its end. The generation token the transport captured
+      // on that same (failed) response tells us which: if it changed, reconcile
+      // and read the new log from the start; otherwise it is a genuine network
+      // error, so propagate it and let the next tick retry.
+      if (!this.adoptGenerationAndMaybeReset()) throw err;
+      pulled = await this.transport.read(this.relayReadOffset);
+    }
+    // A read that *succeeded* can still have crossed a restart: the fresh log
+    // may already have grown past our stale offset, so those bytes are from a
+    // different log at a misaligned offset. Detect the generation change before
+    // applying anything and re-read from the reset cursor.
+    if (this.adoptGenerationAndMaybeReset()) {
+      pulled = await this.transport.read(this.relayReadOffset);
+    }
     if (pulled.length > 0) {
       // Decode only whole blobs and advance the cursor by exactly what was
       // consumed. A relay read can end mid-blob (the log is unframed bytes,

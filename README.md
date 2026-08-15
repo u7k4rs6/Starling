@@ -60,9 +60,9 @@ That gap is the entire reason `Doc` (Fugue) ships and `RgaDoc` stays behind glas
 |---|---|
 | [`crdt`](packages/crdt) | The algorithm, shipped as `starling-crdt`. `Doc` (Fugue) is the one you use; `RgaDoc`, `ArrayDoc`, and `NaiveDoc` are kept as reference implementations and benchmarked next to it. No dependencies, no DOM, no clock. |
 | [`editor`](packages/editor) | The ProseMirror binding, plus an undo manager that uses no OT and no `prosemirror-history`. Headless: the whole thing runs in Node. |
-| [`provider`](packages/provider) | Client glue: IndexedDB persistence, the relay transport, the sync loop, presence. |
+| [`provider`](packages/provider) | Client glue: IndexedDB persistence, the relay transport, the sync loop, and presence (`AwarenessClient`, shipped and tested). |
 | [`relay`](packages/relay) | An append-only byte log with a cursor. It has no idea what a character or a tombstone is. |
-| [`demo`](packages/demo) | Two editor panes, connection toggles, remote cursors, an offline switch. |
+| [`demo`](packages/demo) | Two live replicas of one document, a panel that cuts, delays, drops, and reorders their links, and a convergence indicator. It leaves out the shipped `AwarenessClient` remote cursors on purpose, to keep one polling channel per pane and stay inside the free relay's request budget. |
 | [`sim`](packages/sim) | A deterministic network: seeded RNG, virtual clock, a queue that drops, dupes, reorders, and partitions. The convergence proofs run against it. |
 
 Two boundaries in that diagram are load-bearing enough to guard in CI. One keeps the core deterministic (no `Date.now`, no `Math.random`, no DOM, all injected) so the simulator can replay any bug from a seed. The other keeps the relay ignorant: it may not import the CRDT package or so much as mention `ElemId`. Both fail the build, not a linter warning, because a boundary that lives only in a design doc stops being true the first week nobody's looking.

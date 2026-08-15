@@ -20,9 +20,20 @@ if (!allowedOrigin) {
 }
 
 const port = Number(process.env.PORT ?? 8787);
+
+// How many trusted proxies front this process. It MUST match the platform, or
+// the per-IP append limit misfires: left at 0 behind a proxy (Render, a CDN),
+// every visitor's request arrives from the proxy's single socket address and
+// they all share one rate-limit budget; set too high, a client could forge
+// X-Forwarded-For to get a fresh budget. Render terminates TLS at one edge and
+// appends the real client IP to X-Forwarded-For, so set RELAY_TRUSTED_PROXY_DEPTH=1
+// there. Default 0 keeps local and no-proxy runs safe.
+const trustedProxyDepth = Number(process.env.RELAY_TRUSTED_PROXY_DEPTH ?? 0);
+
 const server = createRelayServer({
   allowedOrigin,
   dataDir: process.env.RELAY_DATA_DIR,
+  trustedProxyDepth,
 });
 
 server.listen(port, "0.0.0.0", () => {

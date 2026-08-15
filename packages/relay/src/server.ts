@@ -1,12 +1,26 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
+import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import { ConnectionLimiter } from "./connection-limit.js";
 import { RateLimiter } from "./rate-limit.js";
 import { LogStore, MAX_MESSAGE_BYTES } from "./store.js";
 
-/** SECURITY §2.1: blunt limits, hard errors, no soft warnings. */
+/** SECURITY §2.1: blunt limits, hard errors, no soft warnings.
+ *
+ * The rate limits apply to appends (POST) only; reads (GET) are unlimited. A
+ * visitor's steady traffic is almost all reads (each of two panes polls up to
+ * ~2.5 times a second, about 10 reads per second for the visitor), and rate-
+ * limiting those would punish everyone behind a shared address (an office or
+ * carrier CGNAT) for ordinary use. Appends happen only when there is an edit to
+ * push, roughly 2.5 to 5 per second per actively typing visitor, so the per-IP
+ * append cap of 100/s clears about 20 to 40 simultaneously typing visitors on
+ * one address before it bites. See DECISIONS #0032. */
 const MAX_CONNECTIONS_PER_IP = 20;
 const APPEND_RATE_PER_SECOND = 100;
+/** A second ceiling per document, so one room cannot be driven far past what a
+ * handful of typists produce (about 5/s) no matter how the appenders' IPs
+ * spread. Well above human use, well below a script. */
+const APPEND_RATE_PER_SECOND_PER_DOC = 60;
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type RelayOptions = {
@@ -15,6 +29,8 @@ export type RelayOptions = {
   dataDir?: string;
   maxConnectionsPerIp?: number;
   appendRatePerSecond?: number;
+  /** Per-document append ceiling, defaults to APPEND_RATE_PER_SECOND_PER_DOC. */
+  appendRatePerSecondPerDoc?: number;
   idleTimeoutMs?: number;
   /**
    * How many reverse proxies sit in front of the relay. 0 (default) trusts
@@ -58,11 +74,19 @@ function clientKey(req: IncomingMessage, trustedProxyDepth: number): string {
   return nearestFirst[index]!;
 }
 
+/** The response header carrying the relay's per-boot generation token. A client
+ * reads it to notice a restart (see below) and reconcile. */
+const GENERATION_HEADER = "X-Relay-Generation";
+
 function setCors(req: IncomingMessage, res: ServerResponse, allowedOrigin: string): void {
   if (req.headers.origin === allowedOrigin) {
     res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    // Non-safelisted response headers are hidden from cross-origin script
+    // unless named here, so the browser client can only read the generation
+    // token if we expose it explicitly.
+    res.setHeader("Access-Control-Expose-Headers", GENERATION_HEADER);
   }
 }
 
@@ -130,7 +154,7 @@ function readBodyWithCap(req: IncomingMessage, maxBytes: number): Promise<Buffer
   });
 }
 
-async function handleRequest(store: LogStore, rateLimiter: RateLimiter, options: RelayOptions, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleRequest(store: LogStore, rateLimiter: RateLimiter, docRateLimiter: RateLimiter, options: RelayOptions, generationId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCors(req, res, options.allowedOrigin);
 
   if (req.method === "OPTIONS") {
@@ -140,6 +164,20 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, options:
   }
 
   const url = new URL(req.url ?? "/", "http://relay.internal");
+
+  // A liveness probe for the host (Render pings this) and a cheap way to read
+  // the current generation. No doc id, no origin check, no rate limit: a health
+  // check carries no Origin and must not be throttled or count as an append.
+  if (url.pathname === "/health") {
+    sendJson(res, 200, {
+      ok: true,
+      generation: generationId,
+      docs: store.docCount(),
+      uptimeSeconds: Math.round(process.uptime()),
+    });
+    return;
+  }
+
   const match = DOC_PATH_RE.exec(url.pathname);
   if (!match) {
     sendJson(res, 404, { error: "not found" });
@@ -155,7 +193,9 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, options:
       sendJson(res, 403, { error: "forbidden origin" });
       return;
     }
-    if (!rateLimiter.allow(clientKey(req, options.trustedProxyDepth ?? 0))) {
+    // Two ceilings: per client address, and per document. Either one tripping
+    // rejects the append (both record the attempt, which is fine).
+    if (!rateLimiter.allow(clientKey(req, options.trustedProxyDepth ?? 0)) || !docRateLimiter.allow(docId)) {
       sendJson(res, 429, { error: "rate limit exceeded" });
       return;
     }
@@ -189,8 +229,21 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, options:
     }
     const result = store.read(docId, from);
     if (!result.ok) {
-      const status = result.error === "invalid document id" ? 400 : 416;
-      sendJson(res, status, { error: result.error });
+      if (result.error === "invalid document id") {
+        sendJson(res, 400, { error: result.error });
+        return;
+      }
+      // Out of range: `from` is past the end of this log. Rather than 416, we
+      // return an empty body. The only way a well-behaved client's cursor gets
+      // ahead of the log is that the log reset under it: the relay runs in
+      // memory with no persistent disk on the free host, so a spin-down and
+      // restart brings the process back with an empty log while clients still
+      // hold a cursor into the old one. Returning empty lets that read succeed,
+      // and the changed generation token on the same response tells the client
+      // to reconcile (reset its cursor and re-push). A hard 416 would instead
+      // throw on the client and wedge every future sync. See DECISIONS #0031.
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": 0 });
+      res.end();
       return;
     }
     res.writeHead(200, {
@@ -209,11 +262,20 @@ export function createRelayServer(options: RelayOptions): Server {
   store.replayFromDisk();
 
   const rateLimiter = new RateLimiter(options.appendRatePerSecond ?? APPEND_RATE_PER_SECOND);
+  const docRateLimiter = new RateLimiter(options.appendRatePerSecondPerDoc ?? APPEND_RATE_PER_SECOND_PER_DOC);
   const connectionLimiter = new ConnectionLimiter(options.maxConnectionsPerIp ?? MAX_CONNECTIONS_PER_IP);
   const idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
 
+  // A fresh token each time the process boots. The in-memory log starts empty
+  // on every boot (there is no persistent disk on the free host), so the token
+  // marks "this is a new log instance": a client that sees it change knows its
+  // cursor into the previous instance is meaningless and reconciles. Set on
+  // every response, before handleRequest, so even a 500 carries it.
+  const generationId = randomUUID();
+
   const server = createServer((req, res) => {
-    handleRequest(store, rateLimiter, options, req, res).catch(() => {
+    res.setHeader(GENERATION_HEADER, generationId);
+    handleRequest(store, rateLimiter, docRateLimiter, options, generationId, req, res).catch(() => {
       if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
     });
   });

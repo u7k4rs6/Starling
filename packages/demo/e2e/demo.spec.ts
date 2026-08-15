@@ -123,3 +123,28 @@ test("sharing hands both replicas to the relay and they still converge", async (
   expect(text).toContain("local");
   expect(text).toContain("-relayed");
 });
+
+test("the break-it controls still work after sharing over the relay", async ({ page }) => {
+  // Item 3: the controls wrap the active transport, including the relay one, so
+  // partitioning must still diverge and heal after the handoff.
+  await typeInto(page, "A", "base");
+  await expect.poll(() => paneText(page, "B")).toContain("base");
+
+  await page.locator(".share-button").click();
+  await expect(page.locator(".share-url")).toBeVisible();
+
+  await linkToggle(page, "B").click(); // cut B, now over the relay
+  await expect(linkToggle(page, "B")).toHaveText(/restore/);
+
+  await typeInto(page, "A", "-A");
+  await typeInto(page, "B", "-B");
+  await page.waitForTimeout(1_500);
+  const [textA, textB] = await Promise.all([paneText(page, "A"), paneText(page, "B")]);
+  expect(textA).not.toBe(textB); // partition still bites after the handoff
+  expect(textA).not.toContain("-B");
+
+  await linkToggle(page, "B").click(); // restore
+  await expect
+    .poll(async () => (await paneText(page, "A")) === (await paneText(page, "B")), { timeout: 8_000 })
+    .toBe(true);
+});

@@ -93,11 +93,16 @@ describe("relay server: input validation (SECURITY §2.2)", () => {
     expect(resGarbage.status).toBe(400);
   });
 
-  it("rejects an offset beyond the log's length", async () => {
+  it("returns an empty body (not 416) for an offset beyond the log's length", async () => {
+    // A cursor past the end means the log reset under the client (a restart on
+    // the free host's in-memory relay). Empty body + the changed generation
+    // token lets the client reconcile instead of wedging on a hard error. See
+    // DECISIONS #0031.
     const base = await start();
     await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "abc" });
     const res = await fetch(`${base}/doc/${DOC_A}?from=999`);
-    expect(res.status).toBe(416);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
   });
 
   it("rejects a message over the size cap with 413", async () => {
@@ -220,6 +225,17 @@ describe("relay server: rate limiting (SECURITY §2.1)", () => {
     expect((await post("2.2.2.2")).status).toBe(200);
   });
 
+  it("limits appends per document, independently of the per-IP limit", async () => {
+    const base = await start({ appendRatePerSecond: 100, appendRatePerSecondPerDoc: 1 });
+    const DOC_B = "22222222-2222-4222-8222-222222222222";
+    expect((await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "x" })).status).toBe(200);
+    // Second append to the same doc trips the per-doc ceiling even though the
+    // per-IP budget (100/s) is nowhere near spent.
+    expect((await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "y" })).status).toBe(429);
+    // A different doc has its own per-doc budget.
+    expect((await fetch(`${base}/doc/${DOC_B}`, { method: "POST", body: "z" })).status).toBe(200);
+  });
+
   it("by default (trustedProxyDepth 0) ignores X-Forwarded-For, so it can't be used to dodge the limit", async () => {
     const base = await start({ appendRatePerSecond: 1 });
     const post = (clientIp: string) =>
@@ -233,6 +249,60 @@ describe("relay server: rate limiting (SECURITY §2.1)", () => {
     // XFF must not each get a fresh budget.
     expect((await post("1.1.1.1")).status).toBe(200);
     expect((await post("9.9.9.9")).status).toBe(429);
+  });
+});
+
+describe("relay server: generation token (restart reconciliation)", () => {
+  it("returns a generation token on every response, stable within one boot", async () => {
+    const base = await start();
+    const post = await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "x" });
+    const get = await fetch(`${base}/doc/${DOC_A}?from=0`);
+    const gen = post.headers.get("x-relay-generation");
+    expect(gen).toBeTruthy();
+    expect(get.headers.get("x-relay-generation")).toBe(gen);
+  });
+
+  it("exposes the generation header to cross-origin script", async () => {
+    const base = await start();
+    const res = await fetch(`${base}/doc/${DOC_A}?from=0`, { headers: { Origin: ALLOWED_ORIGIN } });
+    expect(res.headers.get("access-control-expose-headers")).toContain("X-Relay-Generation");
+  });
+
+  it("a fresh boot has a different generation, and the empty-body read lets a client notice", async () => {
+    const base1 = await start();
+    const gen1 = (await fetch(`${base1}/doc/${DOC_A}?from=0`)).headers.get("x-relay-generation");
+    await new Promise<void>((resolve) => activeServer!.close(() => resolve()));
+    activeServer = null;
+
+    const base2 = await start();
+    // A stale cursor into the previous instance now reads empty against a fresh,
+    // empty log, and the generation has changed.
+    const res = await fetch(`${base2}/doc/${DOC_A}?from=50`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+    expect(res.headers.get("x-relay-generation")).not.toBe(gen1);
+  });
+});
+
+describe("relay server: health endpoint", () => {
+  it("GET /health returns ok, the generation, and a doc count, with no origin needed", async () => {
+    const base = await start();
+    await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "x" });
+    const res = await fetch(`${base}/health`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; generation: string; docs: number };
+    expect(body.ok).toBe(true);
+    expect(body.generation).toBeTruthy();
+    expect(body.docs).toBe(1);
+  });
+
+  it("does not count against the append rate limit", async () => {
+    const base = await start({ appendRatePerSecond: 1 });
+    await fetch(`${base}/health`);
+    await fetch(`${base}/health`);
+    // The rate limit is for appends; health checks must never exhaust it.
+    const res = await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "x" });
+    expect(res.status).toBe(200);
   });
 });
 
