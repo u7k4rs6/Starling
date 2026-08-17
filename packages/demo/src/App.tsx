@@ -56,6 +56,7 @@ export function App() {
   const [shared, setShared] = useState(setup.startInRelay);
   const [copied, setCopied] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [control, setControl] = useState<ControlState>({
     connectedA: true,
     connectedB: true,
@@ -89,16 +90,30 @@ export function App() {
 
   const onShare = useCallback(async () => {
     if (shared) return;
+    window.history.replaceState(null, "", roomFragment(setup.roomId));
+    setShared(true);
+    setConnecting(true);
+    // Wake the relay before moving onto it. The first request to a sleeping free
+    // instance can take up to a minute to return; until it does, both panes stay
+    // on the local hub, so the demo keeps converging and stays fully usable, and
+    // the wait is shown rather than looking hung. A GET /health wakes the
+    // instance and resolves once it is up.
+    try {
+      await fetch(`${RELAY_URL}/health`, { cache: "no-store" });
+    } catch {
+      // The probe was blocked or the relay is unreachable; try the handover
+      // anyway. If it truly cannot be reached the panes' syncs keep failing and
+      // the local hub still works, which is the never-appears-broken fallback.
+    }
+    // Relay is awake: hand both panes over. switchTransport replays each local
+    // history into the relay and reconciles. Because the panes were already
+    // converged on the local hub, the upgrade is silent, no visible disruption.
     const newA = new ControllableTransport(new HttpRelayTransport(RELAY_URL, setup.roomId), activeLinkA.current.state);
     const newB = new ControllableTransport(new HttpRelayTransport(RELAY_URL, setup.roomId), activeLinkB.current.state);
     activeLinkA.current = newA;
     activeLinkB.current = newB;
-    window.history.replaceState(null, "", roomFragment(setup.roomId));
-    setShared(true);
-    // Replay both local histories into the relay and reconcile. The document
-    // already holds every keystroke; switchTransport just resets the cursors so
-    // they mean something in the relay's log. See Provider.switchTransport.
     await Promise.all([providerA.current?.switchTransport(newA), providerB.current?.switchTransport(newB)]);
+    setConnecting(false);
   }, [shared, setup.roomId]);
 
   const onCopy = useCallback(() => {
@@ -171,7 +186,15 @@ export function App() {
                   {copied ? "copied" : "copy link"}
                 </button>
               </div>
-              <p className="share-note">Anyone with this link can read and edit this room. It is a shared secret, not a login.</p>
+              {connecting ? (
+                <p className="share-note share-connecting">
+                  <span className="share-spinner" aria-hidden="true" />
+                  Waking the relay. On the free tier this can take up to a minute. You can keep editing, it is still live, and
+                  it will connect on its own.
+                </p>
+              ) : (
+                <p className="share-note">Anyone with this link can read and edit this room. It is a shared secret, not a login.</p>
+              )}
             </>
           ) : (
             <>

@@ -347,6 +347,35 @@ body {
   font-size: 0.85rem;
 }
 
+.share-connecting {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.share-spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: 0.45em;
+  vertical-align: -0.05em;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent-ink);
+  border-radius: 50%;
+  animation: share-spin 0.8s linear infinite;
+}
+
+@keyframes share-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .share-spinner {
+    animation-duration: 2.4s;
+  }
+}
+
 @media (min-width: 720px) {
   body {
     font-size: 16px;

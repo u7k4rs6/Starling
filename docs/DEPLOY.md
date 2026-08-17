@@ -87,6 +87,17 @@ step 1. `packages/demo/src/config.ts` reads this at build time; without
 it, the built demo falls back to `http://127.0.0.1:8787` (the local-dev
 default) and won't reach anything once deployed.
 
+**`VITE_RELAY_URL` is baked into the bundle at build time, not read at
+runtime.** Changing the relay's URL later (a new Render service, a custom
+domain) is not a settings change the live page picks up: you must update
+the variable and re-run the Deploy workflow (step 4) to rebuild. The same
+is true of the relay's `RELAY_ALLOWED_ORIGIN`, which must equal the Pages
+origin exactly, `https://<owner>.github.io`, with the scheme and no
+trailing slash and no `/Starling` path (an origin is scheme + host only).
+A mismatch there fails silently in the browser: the relay rejects the
+write server-side and the fetch is a CORS error, so plan to set it to the
+exact origin, not the URL.
+
 ## 4. Deploy
 
 Actions tab → "Deploy demo" workflow → Run workflow. Manual dispatch
@@ -95,7 +106,40 @@ push to `main`, since a redeploy is a visible action against a URL a
 real person might be using. The demo will be live at
 `https://<owner>.github.io/Starling/` once the run finishes.
 
-## 5. Publish `starling-crdt` to npm (Step 17, S12)
+## 5. Verify against the live URL (the checks that only the deployment can run)
+
+Everything below was verified locally against a relay rigged to be slow
+or lossy, but the real sleeping-instance behaviour and a real device can
+only be checked once the URL above is live. Run these after step 4.
+
+- **Cold start.** Leave the relay untouched for 20+ minutes so Render
+  spins it down. Open the live URL, type (it works, local-first), then
+  click Share. Expected, and verified locally against a delayed relay:
+  the editor stays usable throughout, a "Waking the relay" indicator
+  shows the wait, both panes keep converging locally, and the upgrade to
+  the relay is silent when the wake completes. Record the actual wake
+  time; Render's own docs put it near 50 to 60 seconds.
+- **Bare visit touches the relay zero times.** Open the live URL with no
+  `#room=` fragment, edit, and work the break-it panel. Confirm in
+  Render's metrics that the instance never woke. Locally, a bare visit
+  issued zero requests to the relay; this confirms it against the real
+  service, which is the whole instance-hour budget.
+- **`X-Relay-Generation` reaches the browser cross-origin.** In devtools,
+  a `GET` to the relay's `/doc/:id` must show `X-Relay-Generation` as a
+  readable response header. It is exposed via `Access-Control-Expose-Headers`
+  (SECURITY-side, tested in `server.test.ts`), but the exposure is easy to
+  have right in code and wrong in deployment; if the browser cannot read
+  it, restart reconciliation silently stops working.
+- **The room fragment survives the `/Starling/` base path.** Share, copy
+  the link (it should read `https://<owner>.github.io/Starling/#room=...`),
+  open it fresh, and confirm it starts in relay mode. Verified locally
+  against the Pages-base build.
+- **Real device over cellular.** Load the live URL on an actual phone on
+  a cellular connection, not an emulated viewport on wifi, and confirm the
+  poll cadence and the cold start behave. Report anything that differs
+  from desktop.
+
+## 6. Publish `starling-crdt` to npm (Step 17, S12)
 
 `packages/crdt` is publish-ready at v0.1.0 — `npm publish --dry-run`
 (run from `packages/crdt`) passes and shows exactly the intended file
