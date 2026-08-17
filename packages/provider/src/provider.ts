@@ -250,20 +250,7 @@ export class Provider {
     if (this.adoptGenerationAndMaybeReset()) {
       pulled = await this.transport.read(this.relayReadOffset);
     }
-    if (pulled.length > 0) {
-      // Decode only whole blobs and advance the cursor by exactly what was
-      // consumed. A relay read can end mid-blob (the log is unframed bytes,
-      // ARCH §5); advancing by the full response length past an undecodable
-      // tail would skip real ops, and throwing on it would wedge every
-      // future sync — and its push/persist half — on the same offset.
-      const { ops, bytesConsumed } = decodeOpsStreamPartial(pulled);
-      for (const op of ops) this._doc.receive(op);
-      for (const op of ops) {
-        const known = this.lastPushedVector.get(op.id.replica) ?? -1;
-        if (op.id.counter > known) this.lastPushedVector.set(op.id.replica, op.id.counter);
-      }
-      this.relayReadOffset += bytesConsumed;
-    }
+    this.applyPulled(pulled);
 
     const missing = this._doc.missingFrom(this.lastPushedVector);
     if (missing.length > 0) {
@@ -276,6 +263,7 @@ export class Provider {
         // the caller sees it and the next tick retries, since `missing` is
         // re-derived and the vector was never advanced past these ops.
         if (err instanceof RelayPermanentError) {
+          await this.finalReadBeforeBlocking();
           this.syncBlocked = true;
           return;
         }
@@ -288,5 +276,43 @@ export class Provider {
     }
 
     await this.persistNow();
+  }
+
+  /**
+   * Decode and apply a relay read, advancing the read cursor by exactly what was
+   * consumed. Decodes only whole blobs: a relay read can end mid-blob (the log
+   * is unframed bytes, ARCH §5), and advancing past an undecodable tail would
+   * skip real ops. Pulled ops are also marked known-to-the-relay, so a later
+   * `missingFrom` pushes only what the log actually lacks.
+   */
+  private applyPulled(pulled: Uint8Array): void {
+    if (pulled.length === 0) return;
+    const { ops, bytesConsumed } = decodeOpsStreamPartial(pulled);
+    for (const op of ops) this._doc.receive(op);
+    for (const op of ops) {
+      const known = this.lastPushedVector.get(op.id.replica) ?? -1;
+      if (op.id.counter > known) this.lastPushedVector.set(op.id.replica, op.id.counter);
+    }
+    this.relayReadOffset += bytesConsumed;
+  }
+
+  /**
+   * One last read before sync stops for good. The push just froze the room, so
+   * the log will not change again; but ops another client landed between this
+   * sync's initial read and that push are still sitting past our cursor. Pull
+   * them now, so a frozen-out replica ends with every op that reached the log
+   * before it froze, which is what the "your edits stay on this device" message
+   * to the user promises about everything up to the freeze point. Best effort:
+   * skip it on any error or if the log instance changed under us.
+   */
+  private async finalReadBeforeBlocking(): Promise<void> {
+    try {
+      const generationBefore = this.transport.generation?.();
+      const pulled = await this.transport.read(this.relayReadOffset);
+      if (this.transport.generation?.() === generationBefore) this.applyPulled(pulled);
+    } catch {
+      // We are stopping regardless; a failed final read just means we keep
+      // whatever we already had.
+    }
   }
 }

@@ -1,7 +1,8 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { Doc, encodeOps } from "starling-crdt";
 import { createRelayServer, type RelayOptions } from "@starling/relay";
-import { HttpRelayTransport } from "./transport.js";
+import { HttpRelayTransport, type RelayTransport } from "./transport.js";
 import { InMemoryPersistence } from "./persistence.js";
 import { Provider } from "./provider.js";
 
@@ -125,6 +126,38 @@ describe("frozen room: the provider stops retrying instead of polling forever", 
     const lengthLater = (await (await fetch(`${base}/doc/${DOC}?from=0`)).arrayBuffer()).byteLength;
     expect(lengthLater).toBe(lengthAfterFreeze); // no new append reached the relay
     expect(a.text).toContain("y"); // the edit is still there locally, just not propagated
+  });
+
+  it("a frozen-out client still ends with an op that landed between its read and its failing push", async () => {
+    const base = await start({ maxLogBytesPerDoc: 100 });
+
+    // A transport that lands another client's op right after our read completes,
+    // so it is in the log by the time our push freezes but was missed by the
+    // read in the same sync. Exactly the window the final read has to cover.
+    let injected = false;
+    const inner = new HttpRelayTransport(base, DOC);
+    const injecting: RelayTransport = {
+      generation: () => inner.generation(),
+      append: (bytes) => inner.append(bytes),
+      read: async (from) => {
+        const bytes = await inner.read(from);
+        if (!injected) {
+          injected = true;
+          const other = new Doc("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+          await inner.append(encodeOps([other.insertLocal(0, "Z")])); // a concurrent op lands now
+        }
+        return bytes;
+      },
+    };
+
+    const a = await Provider.create("a", new InMemoryPersistence(), injecting);
+    for (let i = 0; i < 12; i += 1) await a.insertLocal(i, "a"); // enough that the push overflows the 100-byte cap
+
+    await a.sync().catch(() => undefined);
+    expect(a.isSyncBlocked()).toBe(true); // the push froze the room
+    // The op that landed after our read but before the freeze was pulled by the
+    // final read, so it is present despite sync having stopped.
+    expect(a.text).toContain("Z");
   });
 });
 
