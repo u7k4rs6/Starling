@@ -114,6 +114,9 @@ importers:
         specifier: workspace:*
         version: link:../crdt
     devDependencies:
+      '@starling/relay':
+        specifier: workspace:*
+        version: link:../relay
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5

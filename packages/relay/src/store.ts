@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 
 /**
@@ -37,6 +38,17 @@ type DocLog = {
   chunks: Buffer[];
   totalBytes: number;
   frozen: boolean;
+  /**
+   * A token identifying this log instance, fresh every time the log is created:
+   * a first append, a re-hydration from disk, or a boot replay. It is per
+   * document, not per process, on purpose. A client detects that the log it was
+   * reading has been replaced by watching this change, and the replacement that
+   * has to be caught is not only a full restart but an LRU eviction and later
+   * recreation, which happens while the process keeps running and so shares the
+   * boot token. Per-document is the only token that changes in that case. See
+   * DECISIONS #0031.
+   */
+  generation: string;
 };
 
 /**
@@ -75,7 +87,7 @@ export class LogStore {
       const docId = entry.name.slice(0, -".log".length);
       if (!isValidDocId(docId)) continue; // never trust filenames beyond the same check as any request
       const bytes = readFileSync(path.join(this.dataDir, entry.name));
-      const doc: DocLog = { chunks: [bytes], totalBytes: bytes.length, frozen: bytes.length >= MAX_LOG_BYTES_PER_DOC };
+      const doc: DocLog = { chunks: [bytes], totalBytes: bytes.length, frozen: bytes.length >= MAX_LOG_BYTES_PER_DOC, generation: randomUUID() };
       this.docs.set(docId, doc);
     }
   }
@@ -118,6 +130,7 @@ export class LogStore {
       chunks: [bytes],
       totalBytes: bytes.length,
       frozen: bytes.length >= MAX_LOG_BYTES_PER_DOC,
+      generation: randomUUID(),
     };
     this.docs.set(docId, doc);
     return doc;
@@ -130,7 +143,7 @@ export class LogStore {
     let doc = this.hydrate(docId);
     if (!doc) {
       this.evictOldestIfFull();
-      doc = { chunks: [], totalBytes: 0, frozen: false };
+      doc = { chunks: [], totalBytes: 0, frozen: false, generation: randomUUID() };
       this.docs.set(docId, doc);
     }
     if (doc.frozen) return { ok: false, error: "log frozen: maximum size reached" };
@@ -162,6 +175,19 @@ export class LogStore {
     if (from > doc.totalBytes) return { ok: false, error: "offset out of range" };
     this.touch(docId);
     return { ok: true, bytes: Buffer.concat(doc.chunks).subarray(from) };
+  }
+
+  /**
+   * The generation token of the resident log instance for `docId`, or undefined
+   * if no instance is resident (never created, or evicted). Resident-only by
+   * design: it is read to stamp responses, and a doc that is absent from memory
+   * has no live instance, so the caller falls back to the boot token. A client
+   * with a stale cursor into a since-replaced instance sees the token change
+   * (per-doc when the doc was recreated, boot when it is now absent) and
+   * reconciles.
+   */
+  generationOf(docId: string): string | undefined {
+    return this.docs.get(docId)?.generation;
   }
 
   /** For tests and diagnostics only — not part of the wire protocol. */

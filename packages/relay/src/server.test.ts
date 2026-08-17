@@ -253,7 +253,7 @@ describe("relay server: rate limiting (SECURITY §2.1)", () => {
 });
 
 describe("relay server: generation token (restart reconciliation)", () => {
-  it("returns a generation token on every response, stable within one boot", async () => {
+  it("returns a per-document token on every response, stable while the doc stays resident", async () => {
     const base = await start();
     const post = await fetch(`${base}/doc/${DOC_A}`, { method: "POST", body: "x" });
     const get = await fetch(`${base}/doc/${DOC_A}?from=0`);

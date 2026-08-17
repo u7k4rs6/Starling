@@ -9,6 +9,7 @@
     "starling-crdt": "workspace:*"
   },
   "devDependencies": {
+    "@starling/relay": "workspace:*",
     "fake-indexeddb": "^6.2.5"
   }
 }

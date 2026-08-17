@@ -27,6 +27,8 @@ export type RelayOptions = {
   /** SECURITY §2.3: exactly the demo origin, never "*". */
   allowedOrigin: string;
   dataDir?: string;
+  /** Resident-doc ceiling before the LRU evicts, defaults to MAX_DOCS. */
+  maxDocs?: number;
   maxConnectionsPerIp?: number;
   appendRatePerSecond?: number;
   /** Per-document append ceiling, defaults to APPEND_RATE_PER_SECOND_PER_DOC. */
@@ -184,6 +186,15 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, docRateL
     return;
   }
   const docId = decodeURIComponent(match[1]!);
+  // Stamp this response with the document's generation token: the resident log
+  // instance's own token, or the boot token when the doc is absent (never
+  // created, or evicted and not yet recreated). It is per document, not per
+  // boot, so a client whose cursor points into a log instance that has since
+  // been replaced sees the token change and reconciles, whether the instance
+  // was lost to a full restart or to an LRU eviction and later recreation. This
+  // overrides the boot-token default the wrapper set, so it covers every
+  // response below, successes and rejections alike. See DECISIONS #0031.
+  res.setHeader(GENERATION_HEADER, store.generationOf(docId) ?? generationId);
 
   if (req.method === "POST") {
     // SECURITY §2.3: reject a browser append from any origin but the demo's,
@@ -212,6 +223,10 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, docRateL
       sendJson(res, status, { error: result.error });
       return;
     }
+    // An append that just created the doc made its token exist; re-stamp so a
+    // creating POST carries the same token its reads will, not the boot default
+    // the pre-op stamp used while the doc was still absent.
+    res.setHeader(GENERATION_HEADER, store.generationOf(docId) ?? generationId);
     sendJson(res, 200, { offset: result.offset });
     return;
   }
@@ -258,7 +273,7 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, docRateL
 }
 
 export function createRelayServer(options: RelayOptions): Server {
-  const store = new LogStore({ dataDir: options.dataDir });
+  const store = new LogStore({ dataDir: options.dataDir, maxDocs: options.maxDocs });
   store.replayFromDisk();
 
   const rateLimiter = new RateLimiter(options.appendRatePerSecond ?? APPEND_RATE_PER_SECOND);
@@ -266,11 +281,11 @@ export function createRelayServer(options: RelayOptions): Server {
   const connectionLimiter = new ConnectionLimiter(options.maxConnectionsPerIp ?? MAX_CONNECTIONS_PER_IP);
   const idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
 
-  // A fresh token each time the process boots. The in-memory log starts empty
-  // on every boot (there is no persistent disk on the free host), so the token
-  // marks "this is a new log instance": a client that sees it change knows its
-  // cursor into the previous instance is meaningless and reconciles. Set on
-  // every response, before handleRequest, so even a 500 carries it.
+  // A fresh token each time the process boots. It is the fallback stamped on
+  // every response before handleRequest (so /health and a 500 carry something),
+  // and the value used for a doc that has no resident log instance. Per-document
+  // requests override it with the doc's own token (see handleRequest), which is
+  // what catches an eviction-and-recreation that the boot token alone would miss.
   const generationId = randomUUID();
 
   const server = createServer((req, res) => {

@@ -148,6 +148,38 @@ describe("LogStore: resource bounds (SECURITY §2.1)", () => {
   }, 10_000);
 });
 
+describe("LogStore: per-document generation token", () => {
+  it("assigns a token on creation, stable while the doc stays resident", () => {
+    const store = new LogStore();
+    store.append(DOC_A, Buffer.from("x"));
+    const token = store.generationOf(DOC_A);
+    expect(token).toBeTruthy();
+    store.append(DOC_A, Buffer.from("y"));
+    store.read(DOC_A, 0);
+    expect(store.generationOf(DOC_A)).toBe(token); // same instance, same token
+  });
+
+  it("has no token for a doc that is not resident", () => {
+    const store = new LogStore();
+    expect(store.generationOf(DOC_A)).toBeUndefined();
+  });
+
+  it("gives a recreated doc a different token after eviction, so a returning client notices", () => {
+    const store = new LogStore({ maxDocs: 2 });
+    store.append(DOC_A, Buffer.from("x"));
+    const before = store.generationOf(DOC_A);
+
+    // Evict DOC_A by creating maxDocs newer docs.
+    store.append(makeUuid(1), Buffer.from("a"));
+    store.append(makeUuid(2), Buffer.from("b"));
+    expect(store.generationOf(DOC_A)).toBeUndefined(); // evicted, no resident instance
+
+    store.append(DOC_A, Buffer.from("z")); // recreated, empty log
+    expect(store.generationOf(DOC_A)).toBeTruthy();
+    expect(store.generationOf(DOC_A)).not.toBe(before); // fresh instance, fresh token
+  });
+});
+
 describe("LogStore: disk persistence and replay (ARCH §5)", () => {
   let dataDir: string;
 
