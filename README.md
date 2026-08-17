@@ -4,13 +4,22 @@
 
 <br/>
 
-![tests](https://img.shields.io/badge/tests-328%20green-f5c518?style=flat-square&labelColor=131518)
+[![live demo](https://img.shields.io/badge/live%20demo-open-f5c518?style=flat-square&labelColor=131518)](https://u7k4rs6.github.io/Starling/)
+![tests](https://img.shields.io/badge/tests-377%20green-f5c518?style=flat-square&labelColor=131518)
 ![npm](https://img.shields.io/badge/npm-starling--crdt%400.1.0-f5c518?style=flat-square&labelColor=131518)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-f5c518?style=flat-square&labelColor=131518)
 ![ci gates](https://img.shields.io/badge/ci%20gates-2%20enforced-8a8f98?style=flat-square&labelColor=131518)
 ![license](https://img.shields.io/badge/license-MIT-8a8f98?style=flat-square&labelColor=131518)
 
 </div>
+
+<br/>
+
+## [Try the live demo →](https://u7k4rs6.github.io/Starling/)
+
+Two panes, side by side, are two replicas of one document, and both are yours. Type in either and the text shows up in the other. That part proves nothing on its own: any shared textarea can echo keystrokes between two boxes. The demonstration is the break-it panel underneath. Cut a replica's link, or turn up latency, loss, and reordering, and keep typing on both sides. The two documents visibly **diverge**. Then restore the link, and they **converge** back to one document, with no conflict prompt, no "resolve changes" dialog, and nothing you typed lost on either side. That reconciliation, not the happy-path echo, is the entire reason this project exists.
+
+A note in fairness: the relay is on a free tier that sleeps when idle, so the first Share of the day waits roughly a minute for it to wake. The editor stays fully usable the whole time, on a purely in-browser transport, and upgrades to the relay on its own once it is up.
 
 <br/>
 

@@ -106,6 +106,25 @@ push to `main`, since a redeploy is a visible action against a URL a
 real person might be using. The demo will be live at
 `https://<owner>.github.io/Starling/` once the run finishes.
 
+### Redeploying: run fresh, do not re-run an old run
+
+To ship a new commit or a changed relay URL, always start a **new** run of
+the "Deploy demo" workflow (Run workflow, from `main`). Do **not** use
+GitHub's "Re-run jobs" on a previous run to pick up a change. A re-run
+checks out the **commit that run was triggered on** and rebuilds against
+the variable **as it was then**, so it republishes that old commit's
+bundle, not your new code. Re-running an old run is only ever right for a
+transient infrastructure failure (for example, the Pages 503 outage we
+hit), where you genuinely want to redeploy the exact same bundle.
+
+The reason is that `VITE_RELAY_URL` (and the relay's `RELAY_ALLOWED_ORIGIN`)
+are **build-time and deploy-time settings, not runtime ones**. `VITE_RELAY_URL`
+is inlined into the JavaScript bundle when `packages/demo` builds, and
+`RELAY_ALLOWED_ORIGIN` is read by the relay process at boot. Neither is a
+value the live page or the running relay re-reads, so changing either
+takes a rebuild (a fresh Deploy run) or a relay restart, never just an
+edit in a settings panel.
+
 ## 5. Verify against the live URL (the checks that only the deployment can run)
 
 Everything below was verified locally against a relay rigged to be slow
