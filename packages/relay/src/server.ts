@@ -29,6 +29,8 @@ export type RelayOptions = {
   dataDir?: string;
   /** Resident-doc ceiling before the LRU evicts, defaults to MAX_DOCS. */
   maxDocs?: number;
+  /** Per-document log freeze size in bytes, defaults to MAX_LOG_BYTES_PER_DOC. */
+  maxLogBytesPerDoc?: number;
   maxConnectionsPerIp?: number;
   appendRatePerSecond?: number;
   /** Per-document append ceiling, defaults to APPEND_RATE_PER_SECOND_PER_DOC. */
@@ -273,7 +275,7 @@ async function handleRequest(store: LogStore, rateLimiter: RateLimiter, docRateL
 }
 
 export function createRelayServer(options: RelayOptions): Server {
-  const store = new LogStore({ dataDir: options.dataDir, maxDocs: options.maxDocs });
+  const store = new LogStore({ dataDir: options.dataDir, maxDocs: options.maxDocs, maxLogBytesPerDoc: options.maxLogBytesPerDoc });
   store.replayFromDisk();
 
   const rateLimiter = new RateLimiter(options.appendRatePerSecond ?? APPEND_RATE_PER_SECOND);

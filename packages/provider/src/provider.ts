@@ -1,6 +1,6 @@
 import { decodeOps, decodeOpsStreamPartial, Doc, encodeOps, type ElemId, type ReplicaId, type StateVector } from "starling-crdt";
 import type { Persistence } from "./persistence.js";
-import type { RelayTransport } from "./transport.js";
+import { RelayPermanentError, type RelayTransport } from "./transport.js";
 
 /**
  * Client-side glue (ARCH §6): owns the doc, local persistence, and the
@@ -18,6 +18,12 @@ export class Provider {
    * first response (or on a transport that has no generation, e.g. the local
    * hub). A change means the relay restarted onto a fresh log. */
   private knownGeneration: string | undefined = undefined;
+  /** Set once the relay permanently rejects a push (the room's log is frozen at
+   * its size cap, or an update is over the message cap). Sync becomes a no-op:
+   * the push would keep failing, and continuing to poll would hold a free relay
+   * awake for nothing. The document is still fully usable locally; its later
+   * edits just stop propagating, which the UI surfaces (see the demo). */
+  private syncBlocked = false;
   /** Serialises `sync()` — see the method for why overlapping runs corrupt
    * the read cursor. Same one-promise-chain shape `IndexedDbPersistence`
    * uses to force strict call-order execution. */
@@ -168,6 +174,8 @@ export class Provider {
       // The new transport has its own (or no) generation; forget the old one so
       // the first sync adopts it fresh instead of mistaking it for a restart.
       this.knownGeneration = undefined;
+      // A new room is a clean slate; do not carry a previous room's frozen state.
+      this.syncBlocked = false;
       await this.syncNow();
     });
     this.syncChain = result.catch(() => undefined);
@@ -211,7 +219,18 @@ export class Provider {
     return true;
   }
 
+  /** Whether the relay has permanently refused this replica's pushes (the room's
+   * log is frozen, or an update is too large). When true, `sync()` no longer
+   * touches the network; the document is still fully usable locally. */
+  isSyncBlocked(): boolean {
+    return this.syncBlocked;
+  }
+
   private async syncNow(): Promise<void> {
+    // Once the relay permanently refuses this replica's pushes there is nothing
+    // a sync can do but fail again, so stop touching the network entirely.
+    if (this.syncBlocked) return;
+
     let pulled: Uint8Array;
     try {
       pulled = await this.transport.read(this.relayReadOffset);
@@ -248,7 +267,20 @@ export class Provider {
 
     const missing = this._doc.missingFrom(this.lastPushedVector);
     if (missing.length > 0) {
-      await this.transport.append(encodeOps(missing));
+      try {
+        await this.transport.append(encodeOps(missing));
+      } catch (err) {
+        // A permanent rejection (frozen room, oversized update) is terminal:
+        // block sync so it stops here rather than re-offering the same doomed
+        // push every tick. A transient failure (429, network) is rethrown so
+        // the caller sees it and the next tick retries, since `missing` is
+        // re-derived and the vector was never advanced past these ops.
+        if (err instanceof RelayPermanentError) {
+          this.syncBlocked = true;
+          return;
+        }
+        throw err;
+      }
       for (const op of missing) {
         const known = this.lastPushedVector.get(op.id.replica) ?? -1;
         if (op.id.counter > known) this.lastPushedVector.set(op.id.replica, op.id.counter);

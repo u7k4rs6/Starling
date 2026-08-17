@@ -106,6 +106,28 @@ describe("rate-limit retry (a path the old unreachable caps never ran)", () => {
   });
 });
 
+describe("frozen room: the provider stops retrying instead of polling forever", () => {
+  it("blocks sync after a permanent (frozen) rejection and issues no further appends", async () => {
+    // A tiny per-doc cap so a little text freezes the log.
+    const base = await start({ maxLogBytesPerDoc: 200 });
+    const a = await Provider.create("a", new InMemoryPersistence(), new HttpRelayTransport(base, DOC));
+
+    for (let i = 0; i < 60; i += 1) await a.insertLocal(i, "x"); // well over 200 bytes encoded
+    for (let i = 0; i < 4 && !a.isSyncBlocked(); i += 1) await a.sync().catch(() => undefined);
+    expect(a.isSyncBlocked()).toBe(true);
+
+    // Once blocked, sync must not touch the relay again: the log length the
+    // server reports does not move across further syncs, and no request throws.
+    const lengthAfterFreeze = (await (await fetch(`${base}/doc/${DOC}?from=0`)).arrayBuffer()).byteLength;
+    await a.insertLocal(0, "y"); // a new local edit
+    await a.sync();
+    await a.sync();
+    const lengthLater = (await (await fetch(`${base}/doc/${DOC}?from=0`)).arrayBuffer()).byteLength;
+    expect(lengthLater).toBe(lengthAfterFreeze); // no new append reached the relay
+    expect(a.text).toContain("y"); // the edit is still there locally, just not propagated
+  });
+});
+
 describe("per-document generation over the wire", () => {
   it("different documents carry different tokens, and a document's token is stable while resident", async () => {
     const base = await start();

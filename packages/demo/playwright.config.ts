@@ -24,7 +24,10 @@ export default defineConfig({
       command: "node scripts/dev-relay.mjs",
       url: "http://127.0.0.1:8787/doc/8f14e45f-ceea-467e-bd7e-2e8912cee2b8",
       reuseExistingServer: false,
-      env: { RELAY_ALLOWED_ORIGIN: "http://127.0.0.1:5173" },
+      // A small per-doc freeze cap so the frozen-room test can reach a freeze
+      // with a paragraph of text rather than 2 MB. The other relay tests push
+      // only a handful of characters, well under this. See the frozen-room test.
+      env: { RELAY_ALLOWED_ORIGIN: "http://127.0.0.1:5173", RELAY_MAX_LOG_BYTES: "1024" },
     },
     {
       command: "pnpm exec vite --port 5173 --strictPort",

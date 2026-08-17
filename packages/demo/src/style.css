@@ -143,6 +143,40 @@ body {
   word-break: break-word;
 }
 
+/* Frozen room: a terminal state, styled to stand apart from the normal status */
+.frozen {
+  margin: 0.85rem 0 0;
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--warn);
+  background: var(--bg-sunk);
+}
+
+.frozen-title {
+  margin: 0;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.frozen-note {
+  margin: 0.4rem 0 0.7rem;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+.frozen-button {
+  padding: 0.55rem 0.9rem;
+  border: none;
+  border-radius: 8px;
+  background: var(--warn);
+  color: #fff;
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
 /* Convergence status */
 .status {
   display: flex;

@@ -20,6 +20,24 @@ export interface RelayTransport {
 
 const GENERATION_HEADER = "X-Relay-Generation";
 
+/**
+ * A permanent append rejection: the relay will never accept this push, so
+ * retrying is pointless. The room's log is frozen at its size cap (507), or this
+ * single update exceeds the per-message cap (413). Distinct from a transient
+ * failure (a 429 rate limit, a network blip), which a later sync retries. The
+ * Provider stops syncing when it sees this, rather than re-offering the same
+ * doomed push every tick and holding a free relay awake forever.
+ */
+export class RelayPermanentError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "RelayPermanentError";
+  }
+}
+
 export class HttpRelayTransport implements RelayTransport {
   /** The generation token from the most recent response, success or failure. */
   private lastGeneration: string | undefined = undefined;
@@ -43,7 +61,15 @@ export class HttpRelayTransport implements RelayTransport {
       body: bytes as BodyInit,
     });
     this.captureGeneration(res);
-    if (!res.ok) throw new Error(`relay append failed: ${res.status}`);
+    if (!res.ok) {
+      // 507 (log frozen) and 413 (this update alone is over the message cap) are
+      // permanent: the same push will keep being rejected, so mark it so the
+      // Provider stops retrying instead of polling a full room forever.
+      if (res.status === 507 || res.status === 413) {
+        throw new RelayPermanentError(res.status, `relay append rejected permanently: ${res.status}`);
+      }
+      throw new Error(`relay append failed: ${res.status}`);
+    }
     const body = (await res.json()) as { offset: number };
     return body.offset;
   }

@@ -19,6 +19,9 @@ type EditorPaneProps = {
   onReady: (ready: PaneReady) => void;
   /** Called with the pane's current text whenever it changes, for the status strip. */
   onText: (text: string) => void;
+  /** Called if the relay permanently refuses this pane's pushes (the room's log
+   * froze). The pane stops syncing; the app surfaces the terminal state. */
+  onBlocked: () => void;
 };
 
 /**
@@ -31,7 +34,7 @@ type EditorPaneProps = {
  * enough), catches the errors a partitioned or lossy link throws, and resumes a
  * stopped loop on visibilitychange.
  */
-export function EditorPane({ label, color, replicaId, persistence, link, onReady, onText }: EditorPaneProps) {
+export function EditorPane({ label, color, replicaId, persistence, link, onReady, onText, onBlocked }: EditorPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const [pending, setPending] = useState(0);
@@ -129,6 +132,13 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
             view.updateState(EditorState.create({ doc, selection: TextSelection.create(doc, pos), plugins: view.state.plugins }));
           }
           report();
+          if (provider.isSyncBlocked()) {
+            // The room's log is frozen: pushes will never land again. Stop the
+            // loop (no more requests, so a free relay can spin down) and let the
+            // app surface it. The editor stays fully usable locally.
+            onBlocked();
+            return;
+          }
         }
         schedule();
       }
@@ -170,7 +180,7 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
       viewRef.current?.destroy();
       viewRef.current = null;
     };
-  }, [replicaId, persistence, link, onReady, onText]);
+  }, [replicaId, persistence, link, onReady, onText, onBlocked]);
 
   return (
     <section className="pane" style={{ ["--replica" as string]: color }}>

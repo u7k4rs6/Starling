@@ -55,6 +55,7 @@ export function App() {
   const [textB, setTextB] = useState("");
   const [shared, setShared] = useState(setup.startInRelay);
   const [copied, setCopied] = useState(false);
+  const [blocked, setBlocked] = useState(false);
   const [control, setControl] = useState<ControlState>({
     connectedA: true,
     connectedB: true,
@@ -74,6 +75,14 @@ export function App() {
   }, []);
   const onReadyB = useCallback((r: PaneReady) => {
     providerB.current = r.provider;
+  }, []);
+  const onBlocked = useCallback(() => setBlocked(true), []);
+
+  const onNewRoom = useCallback(() => {
+    // Recovery from a frozen room: drop the room id and reload into a fresh,
+    // local-only session. A full reload is deliberate, it tears down the frozen
+    // providers cleanly rather than trying to un-freeze them in place.
+    window.location.href = window.location.pathname;
   }, []);
 
   const shareUrl = `${window.location.origin}${window.location.pathname}${roomFragment(setup.roomId)}`;
@@ -122,6 +131,7 @@ export function App() {
             persistence={setup.persistenceA}
             onReady={onReadyA}
             onText={setTextA}
+            onBlocked={onBlocked}
           />
           <EditorPane
             label="B"
@@ -131,8 +141,22 @@ export function App() {
             persistence={setup.persistenceB}
             onReady={onReadyB}
             onText={setTextB}
+            onBlocked={onBlocked}
           />
         </div>
+
+        {blocked && (
+          <div className="frozen" role="alert">
+            <p className="frozen-title">This room is full. Syncing has stopped.</p>
+            <p className="frozen-note">
+              The room reached its size limit, so the relay will not accept more changes. You can keep editing here, but new
+              edits stay on this device and no longer reach anyone else.
+            </p>
+            <button type="button" className="frozen-button" onClick={onNewRoom}>
+              start a fresh room
+            </button>
+          </div>
+        )}
 
         <StatusStrip textA={textA} textB={textB} />
 

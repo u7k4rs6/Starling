@@ -72,10 +72,12 @@ export class LogStore {
   private readonly docs = new Map<string, DocLog>();
   private readonly dataDir: string | null;
   private readonly maxDocs: number;
+  private readonly maxLogBytes: number;
 
-  constructor(options: { dataDir?: string; maxDocs?: number } = {}) {
+  constructor(options: { dataDir?: string; maxDocs?: number; maxLogBytesPerDoc?: number } = {}) {
     this.dataDir = options.dataDir ?? null;
     this.maxDocs = options.maxDocs ?? MAX_DOCS;
+    this.maxLogBytes = options.maxLogBytesPerDoc ?? MAX_LOG_BYTES_PER_DOC;
     if (this.dataDir) mkdirSync(this.dataDir, { recursive: true });
   }
 
@@ -87,7 +89,7 @@ export class LogStore {
       const docId = entry.name.slice(0, -".log".length);
       if (!isValidDocId(docId)) continue; // never trust filenames beyond the same check as any request
       const bytes = readFileSync(path.join(this.dataDir, entry.name));
-      const doc: DocLog = { chunks: [bytes], totalBytes: bytes.length, frozen: bytes.length >= MAX_LOG_BYTES_PER_DOC, generation: randomUUID() };
+      const doc: DocLog = { chunks: [bytes], totalBytes: bytes.length, frozen: bytes.length >= this.maxLogBytes, generation: randomUUID() };
       this.docs.set(docId, doc);
     }
   }
@@ -129,7 +131,7 @@ export class LogStore {
     const doc: DocLog = {
       chunks: [bytes],
       totalBytes: bytes.length,
-      frozen: bytes.length >= MAX_LOG_BYTES_PER_DOC,
+      frozen: bytes.length >= this.maxLogBytes,
       generation: randomUUID(),
     };
     this.docs.set(docId, doc);
@@ -147,7 +149,7 @@ export class LogStore {
       this.docs.set(docId, doc);
     }
     if (doc.frozen) return { ok: false, error: "log frozen: maximum size reached" };
-    if (doc.totalBytes + bytes.length > MAX_LOG_BYTES_PER_DOC) {
+    if (doc.totalBytes + bytes.length > this.maxLogBytes) {
       doc.frozen = true;
       return { ok: false, error: "log frozen: maximum size reached" };
     }

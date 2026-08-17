@@ -124,6 +124,26 @@ test("sharing hands both replicas to the relay and they still converge", async (
   expect(text).toContain("-relayed");
 });
 
+test("a room that fills up surfaces a terminal frozen state and offers a fresh room", async ({ page }) => {
+  // The e2e relay runs with a tiny per-doc freeze cap (playwright.config.ts), so
+  // a paragraph of text is enough to fill a shared room.
+  await page.locator(".share-button").click();
+  await expect(page.locator(".share-url")).toBeVisible();
+
+  await editor(page, "A").click();
+  await page.keyboard.type("x".repeat(220));
+
+  // The frozen banner appears: the edits stopped propagating and the visitor is
+  // told, rather than diverging silently.
+  await expect(page.locator(".frozen")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".frozen-button")).toBeVisible();
+
+  // Recovery: start a fresh room drops back to a clean local session.
+  await page.locator(".frozen-button").click();
+  await expect(page.locator(".share-button")).toBeVisible();
+  await expect(page.locator(".frozen")).toHaveCount(0);
+});
+
 test("the break-it controls still work after sharing over the relay", async ({ page }) => {
   // Item 3: the controls wrap the active transport, including the relay one, so
   // partitioning must still diverge and heal after the handoff.
