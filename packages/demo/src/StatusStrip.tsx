@@ -15,9 +15,7 @@ export function StatusStrip({ textA, textB }: { textA: string; textB: string }) 
         {converged ? "converged" : "diverging"}
       </span>
       <span className="status-detail">
-        {converged
-          ? "both replicas hold the same document"
-          : "the replicas differ, and will reconcile once the links are clear"}
+        {converged ? "both replicas hold the same document" : "the replicas differ; they will reconcile as edits sync"}
       </span>
     </div>
   );

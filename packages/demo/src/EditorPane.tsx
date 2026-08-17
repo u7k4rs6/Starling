@@ -1,9 +1,16 @@
 import { opToStep, pmDocFromDoc, pmPosToAnchor, anchorToPmPos, transactionToOps, UndoManager } from "@starling/editor";
-import { ControllableTransport, nextSyncDecision, Provider, type Persistence } from "@starling/provider";
+import { ControllableTransport, nextSyncDecision, Provider, type Persistence, type SyncTimingOverrides } from "@starling/provider";
 import { useEffect, useRef, useState } from "react";
 import { EditorState, TextSelection, type Transaction } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { keymap } from "prosemirror-keymap";
+
+// Optional overrides for the hidden-tab timings, so the e2e can force the stop
+// in seconds. Unset in production, where the real 2-minute grace applies.
+const SYNC_TIMING: SyncTimingOverrides = {
+  hiddenStopMs: import.meta.env.VITE_HIDDEN_POLL_STOP_MS ? Number(import.meta.env.VITE_HIDDEN_POLL_STOP_MS) : undefined,
+  hiddenIntervalMs: import.meta.env.VITE_SYNC_HIDDEN_MS ? Number(import.meta.env.VITE_SYNC_HIDDEN_MS) : undefined,
+};
 
 export type PaneReady = { provider: Provider; link: ControllableTransport };
 
@@ -42,6 +49,7 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false; // true once the loop hard-stops; onVisibility resumes it
     let lastChangeAt = Date.now();
     let hiddenSince = document.visibilityState === "hidden" ? Date.now() : 0;
     const undo = new UndoManager();
@@ -146,21 +154,41 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
       function schedule(): void {
         if (cancelled) return;
         const visible = document.visibilityState === "visible";
-        const decision = nextSyncDecision({
-          visible,
-          msSinceChange: Date.now() - lastChangeAt,
-          msHidden: visible ? 0 : Date.now() - (hiddenSince || Date.now()),
-        });
-        if (decision.poll) timer = setTimeout(() => void tick(), decision.delayMs);
-        // else: stopped. onVisibility resumes it.
+        const decision = nextSyncDecision(
+          {
+            visible,
+            msSinceChange: Date.now() - lastChangeAt,
+            msHidden: visible ? 0 : Date.now() - (hiddenSince || Date.now()),
+          },
+          SYNC_TIMING
+        );
+        if (decision.poll) {
+          stopped = false;
+          timer = setTimeout(() => void tick(), decision.delayMs);
+        } else {
+          // Hard stop: the tab has been hidden and idle long enough. Record the
+          // stop explicitly. `timer` alone cannot mark this, because it still
+          // holds the id of the timer that just fired, so it is never undefined
+          // here; using it as the resume signal was the bug that stranded a
+          // backgrounded tab permanently.
+          stopped = true;
+        }
       }
 
       function onVisibility(): void {
         if (document.visibilityState === "hidden") {
           hiddenSince = Date.now();
-        } else {
-          hiddenSince = 0;
-          if (timer === undefined) void tick(); // resume a stopped loop
+          return;
+        }
+        hiddenSince = 0;
+        // Becoming visible: restart the loop only if it had hard-stopped. When
+        // stopped there is no pending or in-flight tick, so this cannot double
+        // up. A still-running loop is left alone (its next tick re-adopts the
+        // visible cadence), which avoids firing a second concurrent tick over
+        // one that is mid-await.
+        if (stopped) {
+          stopped = false;
+          void tick();
         }
       }
       document.addEventListener("visibilitychange", onVisibility);

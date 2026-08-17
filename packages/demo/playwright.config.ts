@@ -33,6 +33,11 @@ export default defineConfig({
       command: "pnpm exec vite --port 5173 --strictPort",
       url: "http://127.0.0.1:5173",
       reuseExistingServer: false,
+      // Shrink the hidden-tab grace and interval so the backgrounded-tab hard
+      // stop, and its resume, can be exercised in seconds instead of 2 minutes.
+      // These only take effect while a tab is hidden, so visible tests are
+      // unaffected. See the "backgrounded during a cold start" test.
+      env: { VITE_HIDDEN_POLL_STOP_MS: "1200", VITE_SYNC_HIDDEN_MS: "400" },
     },
   ],
 });

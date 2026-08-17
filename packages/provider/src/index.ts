@@ -8,7 +8,7 @@ export type { RelayTransport } from "./transport.js";
 export { LocalRelayHub, LocalRelayTransport } from "./local-transport.js";
 export type { BroadcastLike } from "./local-transport.js";
 export { nextSyncDecision, SYNC_INTERVAL_ACTIVE_MS, SYNC_INTERVAL_IDLE_MS, SYNC_INTERVAL_HIDDEN_MS, SYNC_ACTIVE_WINDOW_MS, HIDDEN_POLL_STOP_MS } from "./sync-scheduler.js";
-export type { SyncActivity, SyncDecision } from "./sync-scheduler.js";
+export type { SyncActivity, SyncDecision, SyncTimingOverrides } from "./sync-scheduler.js";
 export { ControllableTransport } from "./controllable-transport.js";
 export type { LinkState } from "./controllable-transport.js";
 export { generateRoomId, isValidRoomId, roomFragment, roomIdFromFragment, decideTransportMode } from "./room.js";

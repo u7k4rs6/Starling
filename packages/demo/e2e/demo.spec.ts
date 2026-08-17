@@ -124,6 +124,42 @@ test("sharing hands both replicas to the relay and they still converge", async (
   expect(text).toContain("-relayed");
 });
 
+test("polling resumes after the tab is backgrounded past the hidden-stop, then foregrounded", async ({ page }) => {
+  // Regression for the live cold-start stall: a tab backgrounded during the
+  // ~50s wake crosses the hidden-tab hard stop, and before the fix the resume
+  // never fired, so sync died permanently after the handover. The e2e vite
+  // server runs with a shrunk hidden grace (playwright.config.ts) so the stop
+  // is reachable in seconds.
+  await page.locator(".share-button").click();
+  await expect(page.locator(".share-url")).toBeVisible();
+
+  // Make visibilityState controllable, and confirm sync works while visible.
+  await page.evaluate(() => {
+    let vis = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => vis });
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => vis === "hidden" });
+    (window as unknown as { __setVis: (v: string) => void }).__setVis = (v: string) => {
+      vis = v;
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+  });
+  await typeInto(page, "A", "before-hide");
+  await expect.poll(() => paneText(page, "B"), { timeout: 8_000 }).toContain("before-hide");
+
+  // Background the tab and wait past the (shrunk) hidden-stop so the loop halts.
+  await page.evaluate(() => (window as unknown as { __setVis: (v: string) => void }).__setVis("hidden"));
+  await page.waitForTimeout(2_500);
+
+  // Foreground it, then type. The edit must reach B, which it only can if the
+  // loop resumed after the hard stop and kept syncing through the relay.
+  await page.evaluate(() => (window as unknown as { __setVis: (v: string) => void }).__setVis("visible"));
+  await typeInto(page, "A", " after-return");
+  await expect.poll(() => paneText(page, "B"), { timeout: 8_000 }).toContain("after-return");
+  await expect
+    .poll(async () => (await paneText(page, "A")) === (await paneText(page, "B")), { timeout: 8_000 })
+    .toBe(true);
+});
+
 test("a room that fills up surfaces a terminal frozen state and offers a fresh room", async ({ page }) => {
   // The e2e relay runs with a tiny per-doc freeze cap (playwright.config.ts), so
   // a paragraph of text is enough to fill a shared room.

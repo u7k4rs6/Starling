@@ -48,14 +48,23 @@ export type SyncDecision =
   /** Stop polling; the caller resumes on visibilitychange. */
   | { poll: false };
 
-export function nextSyncDecision(activity: SyncActivity): SyncDecision {
+/** Overrides for the hidden-tab timings, so an e2e can trigger the stop in
+ * seconds rather than the real 2 minutes. Production passes nothing. */
+export type SyncTimingOverrides = {
+  hiddenStopMs?: number;
+  hiddenIntervalMs?: number;
+};
+
+export function nextSyncDecision(activity: SyncActivity, timing: SyncTimingOverrides = {}): SyncDecision {
   if (activity.visible) {
     const delayMs = activity.msSinceChange <= SYNC_ACTIVE_WINDOW_MS ? SYNC_INTERVAL_ACTIVE_MS : SYNC_INTERVAL_IDLE_MS;
     return { poll: true, delayMs };
   }
+  const hiddenStopMs = timing.hiddenStopMs ?? HIDDEN_POLL_STOP_MS;
+  const hiddenIntervalMs = timing.hiddenIntervalMs ?? SYNC_INTERVAL_HIDDEN_MS;
   // Hidden: stop once the tab has been hidden for the grace window with no
   // change arriving in it. A remote change resets msSinceChange, so an active
   // room keeps a hidden tab syncing; a truly idle one is let go.
-  if (Math.min(activity.msHidden, activity.msSinceChange) >= HIDDEN_POLL_STOP_MS) return { poll: false };
-  return { poll: true, delayMs: SYNC_INTERVAL_HIDDEN_MS };
+  if (Math.min(activity.msHidden, activity.msSinceChange) >= hiddenStopMs) return { poll: false };
+  return { poll: true, delayMs: hiddenIntervalMs };
 }
