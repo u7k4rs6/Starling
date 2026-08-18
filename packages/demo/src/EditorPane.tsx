@@ -1,9 +1,7 @@
-import { opToStep, pmDocFromDoc, pmPosToAnchor, anchorToPmPos, transactionToOps, UndoManager } from "@starling/editor";
 import { ControllableTransport, nextSyncDecision, Provider, type Persistence, type SyncTimingOverrides } from "@starling/provider";
 import { useEffect, useRef, useState } from "react";
-import { EditorState, TextSelection, type Transaction } from "prosemirror-state";
-import { EditorView } from "prosemirror-view";
-import { keymap } from "prosemirror-keymap";
+import { Star } from "./Star.js";
+import { applyTextEdit, type TextEdit } from "./text-binding.js";
 
 // Optional overrides for the hidden-tab timings, so the e2e can force the stop
 // in seconds. Unset in production, where the real 2-minute grace applies.
@@ -12,38 +10,35 @@ const SYNC_TIMING: SyncTimingOverrides = {
   hiddenIntervalMs: import.meta.env.VITE_SYNC_HIDDEN_MS ? Number(import.meta.env.VITE_SYNC_HIDDEN_MS) : undefined,
 };
 
-export type PaneReady = { provider: Provider; link: ControllableTransport };
+export type PaneState = { text: string; pending: number };
 
 type EditorPaneProps = {
-  label: string;
-  color: string;
-  replicaId: string;
-  /** Where this replica's Doc is persisted. Its own namespace, never shared. */
+  site: "A" | "B";
+  /** LOCAL before sharing, RELAY once the room is open. */
+  role: string;
+  /** This replica's link is cut (frame turns pink, pane nudges aside). */
+  isCut: boolean;
+  /** Any link is cut or the room is frozen (drives the drift nudge). */
+  dead: boolean;
   persistence: Persistence;
-  /** The link this pane syncs through. The visitor's controls mutate its state. */
   link: ControllableTransport;
-  /** Called once the provider exists, so the app can drive share and status. */
-  onReady: (ready: PaneReady) => void;
-  /** Called with the pane's current text whenever it changes, for the status strip. */
-  onText: (text: string) => void;
-  /** Called if the relay permanently refuses this pane's pushes (the room's log
-   * froze). The pane stops syncing; the app surfaces the terminal state. */
+  onReady: (provider: Provider) => void;
+  onState: (site: "A" | "B", state: PaneState) => void;
+  onEdit: (site: "A" | "B", edit: TextEdit) => void;
   onBlocked: () => void;
 };
 
 /**
- * One replica: its own Doc, Provider, and ProseMirror view, syncing through the
- * link it is handed. The link is a local in-browser log by default, so the pane
- * works with no relay; the app swaps it for the hosted relay on share.
- *
- * The sync loop is adaptive and partition-tolerant. It reschedules itself from
- * nextSyncDecision (fast while typing, slow when idle, stopped when hidden long
- * enough), catches the errors a partitioned or lossy link throws, and resumes a
- * stopped loop on visibilitychange.
+ * One replica: its own Doc, Provider, and a plain textarea bound to that Doc
+ * through a character diff. The link is an in-browser log by default, so the
+ * pane is live with no relay; the app swaps it for the hosted relay on share.
+ * The sync loop is adaptive, partition-tolerant, and stops a hidden tab (with an
+ * explicit `stopped` flag so it can resume).
  */
-export function EditorPane({ label, color, replicaId, persistence, link, onReady, onText, onBlocked }: EditorPaneProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const viewRef = useRef<EditorView | null>(null);
+export function EditorPane({ site, role, isCut, dead, persistence, link, onReady, onState, onEdit, onBlocked }: EditorPaneProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+  const [lineCount, setLineCount] = useState(1);
   const [pending, setPending] = useState(0);
 
   useEffect(() => {
@@ -52,101 +47,70 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
     let stopped = false; // true once the loop hard-stops; onVisibility resumes it
     let lastChangeAt = Date.now();
     let hiddenSince = document.visibilityState === "hidden" ? Date.now() : 0;
-    const undo = new UndoManager();
-    let undoBuffer: ReturnType<typeof transactionToOps> = [];
-    let undoTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanup: () => void = () => {};
 
     void (async () => {
-      const provider = await Provider.create(replicaId, persistence, link);
+      const provider = await Provider.create(`replica-${site}-${crypto.randomUUID()}`, persistence, link);
       if (cancelled) return;
-      onReady({ provider, link });
+      onReady(provider);
 
       const report = (): void => {
         if (cancelled) return;
-        setPending(provider.pendingCount());
-        onText(provider.text);
+        const p = provider.pendingCount();
+        setPending(p);
+        setLineCount(Math.max(provider.text.split("\n").length, 7));
+        onState(site, { text: provider.text, pending: p });
       };
 
-      const flushUndo = (): void => {
-        if (undoTimer !== undefined) {
-          clearTimeout(undoTimer);
-          undoTimer = undefined;
-        }
-        if (undoBuffer.length > 0) {
-          undo.record(undoBuffer, provider.doc);
-          undoBuffer = [];
-        }
-      };
+      const ta = textareaRef.current;
+      if (ta) ta.value = provider.text;
+      report();
 
-      function dispatch(tr: Transaction): void {
-        const view = viewRef.current;
-        if (!view) return;
-        view.updateState(view.state.apply(tr));
-        if (tr.docChanged) {
-          undoBuffer.push(...transactionToOps(tr, provider.doc));
-          if (undoTimer !== undefined) clearTimeout(undoTimer);
-          undoTimer = setTimeout(flushUndo, 500);
+      function onInput(): void {
+        const el = textareaRef.current;
+        if (!el) return;
+        const edit = applyTextEdit(provider, provider.text, el.value);
+        if (edit) {
           lastChangeAt = Date.now();
           void provider.persistNow();
+          onEdit(site, edit);
           report();
         }
       }
 
-      function runUndo(): boolean {
-        const view = viewRef.current;
-        flushUndo();
-        if (!view || !undo.canUndo()) return false;
-        undo.undo(provider.doc, (op) => {
-          const step = opToStep(op, provider.doc);
-          const result = step.apply(view.state.doc);
-          if (!result.doc) return;
-          view.updateState(EditorState.create({ doc: result.doc, plugins: view.state.plugins }));
-        });
-        lastChangeAt = Date.now();
-        void provider.persistNow();
-        report();
-        return true;
+      function onScroll(): void {
+        const el = textareaRef.current;
+        if (el && gutterRef.current) gutterRef.current.scrollTop = el.scrollTop;
       }
-
-      const view = new EditorView(containerRef.current!, {
-        state: EditorState.create({
-          doc: pmDocFromDoc(provider.doc),
-          plugins: [keymap({ Enter: () => true, "Mod-z": runUndo })],
-        }),
-        dispatchTransaction: dispatch,
-      });
-      viewRef.current = view;
-      report();
 
       async function tick(): Promise<void> {
         if (cancelled) return;
-        const view = viewRef.current;
-        if (view) {
-          const before = provider.text;
-          const anchor = pmPosToAnchor(provider.doc, view.state.selection.head);
-          try {
-            await provider.sync();
-          } catch {
-            // A partitioned or lossy link throws; that is expected while a
-            // control is engaged. The state vector re-offers anything unsent
-            // on the next tick, so nothing is lost. Just try again later.
+        const el = textareaRef.current;
+        const focused = el !== null && document.activeElement === el;
+        const anchor = el ? provider.doc.anchorAt(el.selectionStart) : null;
+        const before = provider.text;
+        try {
+          await provider.sync();
+        } catch {
+          // A partitioned or lossy link throws; expected while a control is
+          // engaged. The state vector re-offers anything unsent next tick.
+        }
+        if (cancelled) return;
+        if (el && provider.text !== before) {
+          lastChangeAt = Date.now();
+          el.value = provider.text;
+          if (focused && anchor) {
+            const pos = provider.doc.resolveAnchor(anchor);
+            el.selectionStart = el.selectionEnd = pos;
           }
-          if (cancelled) return;
-          if (provider.text !== before) {
-            lastChangeAt = Date.now();
-            const doc = pmDocFromDoc(provider.doc);
-            const pos = Math.max(0, Math.min(anchorToPmPos(provider.doc, anchor), doc.content.size - 1));
-            view.updateState(EditorState.create({ doc, selection: TextSelection.create(doc, pos), plugins: view.state.plugins }));
-          }
-          report();
-          if (provider.isSyncBlocked()) {
-            // The room's log is frozen: pushes will never land again. Stop the
-            // loop (no more requests, so a free relay can spin down) and let the
-            // app surface it. The editor stays fully usable locally.
-            onBlocked();
-            return;
-          }
+          onScroll();
+        }
+        report();
+        if (provider.isSyncBlocked()) {
+          // Room frozen: pushes will never land. Stop the loop (no more requests,
+          // so a free relay can spin down) and let the app surface it.
+          onBlocked();
+          return;
         }
         schedule();
       }
@@ -155,23 +119,14 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
         if (cancelled) return;
         const visible = document.visibilityState === "visible";
         const decision = nextSyncDecision(
-          {
-            visible,
-            msSinceChange: Date.now() - lastChangeAt,
-            msHidden: visible ? 0 : Date.now() - (hiddenSince || Date.now()),
-          },
+          { visible, msSinceChange: Date.now() - lastChangeAt, msHidden: visible ? 0 : Date.now() - (hiddenSince || Date.now()) },
           SYNC_TIMING
         );
         if (decision.poll) {
           stopped = false;
           timer = setTimeout(() => void tick(), decision.delayMs);
         } else {
-          // Hard stop: the tab has been hidden and idle long enough. Record the
-          // stop explicitly. `timer` alone cannot mark this, because it still
-          // holds the id of the timer that just fired, so it is never undefined
-          // here; using it as the resume signal was the bug that stranded a
-          // backgrounded tab permanently.
-          stopped = true;
+          stopped = true; // explicit; a fired timer id must not stand in for this
         }
       }
 
@@ -181,23 +136,22 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
           return;
         }
         hiddenSince = 0;
-        // Becoming visible: restart the loop only if it had hard-stopped. When
-        // stopped there is no pending or in-flight tick, so this cannot double
-        // up. A still-running loop is left alone (its next tick re-adopts the
-        // visible cadence), which avoids firing a second concurrent tick over
-        // one that is mid-await.
         if (stopped) {
           stopped = false;
           void tick();
         }
       }
-      document.addEventListener("visibilitychange", onVisibility);
 
+      const el = textareaRef.current;
+      el?.addEventListener("input", onInput);
+      el?.addEventListener("scroll", onScroll);
+      document.addEventListener("visibilitychange", onVisibility);
       void tick();
 
       cleanup = () => {
+        el?.removeEventListener("input", onInput);
+        el?.removeEventListener("scroll", onScroll);
         document.removeEventListener("visibilitychange", onVisibility);
-        if (undoTimer !== undefined) clearTimeout(undoTimer);
       };
     })();
 
@@ -205,19 +159,119 @@ export function EditorPane({ label, color, replicaId, persistence, link, onReady
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
       cleanup();
-      viewRef.current?.destroy();
-      viewRef.current = null;
     };
-  }, [replicaId, persistence, link, onReady, onText, onBlocked]);
+  }, [site, persistence, link, onReady, onState, onEdit, onBlocked]);
+
+  const frameStyle = {
+    flex: "1 1 0%",
+    minWidth: "300px",
+    border: `1px solid ${isCut ? "var(--pink-dim)" : "var(--line)"}`,
+    borderRadius: "var(--r)",
+    background: "var(--editor)",
+    boxShadow: "var(--glow)",
+    display: "flex",
+    flexDirection: "column" as const,
+    minHeight: "292px",
+    transform: dead && isCut ? `translateX(${site === "A" ? "-4px" : "4px"})` : "none",
+    transition: "transform .5s ease, border-color .3s ease",
+  };
+
+  const lines = [];
+  for (let i = 1; i <= lineCount; i += 1) lines.push(i);
 
   return (
-    <section className="pane" style={{ ["--replica" as string]: color }}>
-      <header className="pane-head">
-        <span className="pane-dot" />
-        <span className="pane-label">replica {label}</span>
-        <span className="pane-pending">{pending === 0 ? "in sync" : `${pending} pending`}</span>
-      </header>
-      <div className="pane-surface" ref={containerRef} />
-    </section>
+    <div style={frameStyle} data-pane={site}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "var(--s3)",
+          padding: "10px var(--s4)",
+          borderBottom: "1px solid var(--line-2)",
+          background: "var(--panel-2)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+          <span style={{ fontSize: "var(--t3)", fontWeight: 500, letterSpacing: ".14em" }}>REPLICA {site}</span>
+          <span
+            style={{
+              fontSize: "var(--t0)",
+              letterSpacing: ".14em",
+              padding: "3px 7px",
+              borderRadius: "var(--r)",
+              background: "var(--gold)",
+              color: "#0a0a0a",
+            }}
+          >
+            {role}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--s3)", flex: "none" }}>
+          {pending > 0 && (
+            <span
+              data-pending
+              style={{
+                fontSize: "var(--t0)",
+                letterSpacing: ".12em",
+                padding: "3px 7px",
+                borderRadius: "var(--r)",
+                border: "1px solid var(--pink)",
+                color: "var(--pink)",
+                whiteSpace: "nowrap",
+                animation: "st-pop .3s ease-out",
+              }}
+            >
+              {pending} PENDING
+            </span>
+          )}
+          <Star
+            style={{
+              width: "12px",
+              height: "12px",
+              flex: "none",
+              color: pending > 0 ? "var(--pink)" : "var(--gold)",
+              animation: pending > 0 ? "st-twinkle 1.3s ease-in-out infinite" : "none",
+            }}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: "3px", width: "14px" }} aria-hidden="true">
+            <span style={{ height: "1px", background: "var(--fg-2)", display: "block" }} />
+            <span style={{ height: "1px", background: "var(--fg-2)", display: "block" }} />
+            <span style={{ height: "1px", background: "var(--fg-2)", display: "block" }} />
+          </div>
+        </div>
+      </div>
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        <div ref={gutterRef} style={{ width: "40px", flex: "none", padding: "var(--s4) 0", background: "var(--panel-2)", overflow: "hidden" }}>
+          {lines.map((n) => (
+            <div key={n} style={{ fontSize: "var(--t2)", lineHeight: "26px", textAlign: "right", paddingRight: "10px", color: "var(--fg-3)" }}>
+              {n}
+            </div>
+          ))}
+        </div>
+        <textarea
+          ref={textareaRef}
+          spellCheck={false}
+          wrap="off"
+          placeholder="type here"
+          aria-label={`replica ${site} editor`}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: "238px",
+            resize: "none",
+            border: 0,
+            outline: "none",
+            background: "transparent",
+            color: "var(--fg)",
+            fontSize: "var(--t3)",
+            lineHeight: "26px",
+            whiteSpace: "pre",
+            overflowX: "auto",
+            padding: "var(--s4)",
+          }}
+        />
+      </div>
+    </div>
   );
 }

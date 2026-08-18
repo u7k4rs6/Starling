@@ -9,19 +9,30 @@ import {
   roomFragment,
   roomIdFromFragment,
 } from "@starling/provider";
-import { EditorPane, type PaneReady } from "./EditorPane.js";
-import { Controls, type ControlState } from "./Controls.js";
-import { StatusStrip } from "./StatusStrip.js";
-import { REPLICA_A_COLOR, REPLICA_B_COLOR } from "./colors.js";
+import { EditorPane, type PaneState } from "./EditorPane.js";
+import { Core } from "./Core.js";
+import { BreakIt, type Controls } from "./BreakIt.js";
+import { Health } from "./Health.js";
+import { ActivityMetrics, type LogEntry, type Metrics } from "./ActivityMetrics.js";
+import { Header } from "./Header.js";
+import { ShareBlock, WakingBlock, SharedBlock, FrozenBlock, Footer } from "./StateBlocks.js";
+import { computeStatus, type Phase } from "./status.js";
+import { applyTheme, initialTheme, type Theme } from "./theme.js";
 import { RELAY_URL } from "./config.js";
-import { replicaIdForPane } from "./replica-identity.js";
+import type { TextEdit } from "./text-binding.js";
+
+function nowStamp(): string {
+  const d = new Date();
+  const hms = [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+  return `${hms}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+}
 
 /**
- * The whole demo on one screen. Two replicas of one document sit side by side,
- * each syncing through its own controllable link. By default both links are two
- * views of an in-browser log (LocalRelayHub), so the page is fully live with no
- * server at all: this is what a first-time visitor sees, and it never waits on a
- * cold relay. Sharing hands both replicas over to the hosted relay in place.
+ * The whole demo on one screen, in the Starling v8 design. Two replicas of one
+ * document sit either side of a CORE cut-control; break-it sliders degrade their
+ * links; a connection-health strip and a live log read the real convergence
+ * state. Everything is wired to the real engine: two Providers over a shared
+ * in-browser hub by default, handed to the hosted relay on share.
  */
 export function App() {
   const setup = useMemo(() => {
@@ -38,177 +49,217 @@ export function App() {
       linkB: new ControllableTransport(base()),
       persistenceA: new InMemoryPersistence(),
       persistenceB: new InMemoryPersistence(),
-      replicaA: replicaIdForPane("pane-a"),
-      replicaB: replicaIdForPane("pane-b"),
     };
   }, []);
 
-  // The links the controls act on. They start as the initial links and are
-  // replaced in place when the visitor shares (see onShare), so the controls
-  // keep working after the handoff without the panes remounting.
   const activeLinkA = useRef(setup.linkA);
   const activeLinkB = useRef(setup.linkB);
   const providerA = useRef<Provider | null>(null);
   const providerB = useRef<Provider | null>(null);
+  const wakeTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const wakeCancelled = useRef(false);
+  const divergedSince = useRef<number | null>(null);
+  const logSeq = useRef(0);
 
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [control, setControl] = useState<Controls & { cutA: boolean; cutB: boolean }>({ cutA: false, cutB: false, latency: 0.2, loss: 0, reorder: 0 });
+  const [shared, setShared] = useState(setup.startInRelay);
+  const [waking, setWaking] = useState(false);
+  const [frozen, setFrozen] = useState(false);
+  const [wakeElapsed, setWakeElapsed] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [textA, setTextA] = useState("");
   const [textB, setTextB] = useState("");
-  const [shared, setShared] = useState(setup.startInRelay);
-  const [copied, setCopied] = useState(false);
-  const [blocked, setBlocked] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [control, setControl] = useState<ControlState>({
-    connectedA: true,
-    connectedB: true,
-    latencyMs: 0,
-    dropRate: 0,
-    reorderRate: 0,
-  });
+  const [pendingA, setPendingA] = useState(0);
+  const [pendingB, setPendingB] = useState(0);
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [opsTotal, setOpsTotal] = useState(0);
+  const [recent, setRecent] = useState<{ t: number; n: number }[]>([]);
+  const [conv, setConv] = useState({ sum: 0, count: 0 });
 
+  const pushLog = useCallback((site: string, type: string, payload: string, dest: string, tone: LogEntry["tone"]) => {
+    setLog((prev) => prev.concat([{ id: (logSeq.current += 1), time: nowStamp(), site, type, payload, dest, tone }]).slice(-8));
+  }, []);
+
+  // Apply the current controls to whichever links are active (they are replaced
+  // on share, so this must read the refs, not the initial links).
   useEffect(() => {
-    const shape = { latencyMs: control.latencyMs, dropRate: control.dropRate, reorderRate: control.reorderRate };
-    activeLinkA.current.setState({ ...shape, connected: control.connectedA });
-    activeLinkB.current.setState({ ...shape, connected: control.connectedB });
+    const shape = { latencyMs: control.latency * 1500, dropRate: control.loss, reorderRate: control.reorder };
+    activeLinkA.current.setState({ ...shape, connected: !control.cutA });
+    activeLinkB.current.setState({ ...shape, connected: !control.cutB });
   }, [control]);
 
-  const onReadyA = useCallback((r: PaneReady) => {
-    providerA.current = r.provider;
+  // Prune the 60-second metrics window each second.
+  useEffect(() => {
+    const id = setInterval(() => setRecent((r) => r.filter((x) => x.t >= Date.now() - 60000)), 2000);
+    return () => clearInterval(id);
   }, []);
-  const onReadyB = useCallback((r: PaneReady) => {
-    providerB.current = r.provider;
-  }, []);
-  const onBlocked = useCallback(() => setBlocked(true), []);
 
-  const onNewRoom = useCallback(() => {
-    // Recovery from a frozen room: drop the room id and reload into a fresh,
-    // local-only session. A full reload is deliberate, it tears down the frozen
-    // providers cleanly rather than trying to un-freeze them in place.
-    window.location.href = window.location.pathname;
+  // Convergence timing: measure how long the two documents stay different, and
+  // log the moment they agree again.
+  useEffect(() => {
+    if (textA === textB) {
+      if (divergedSince.current != null) {
+        const dt = Date.now() - divergedSince.current;
+        divergedSince.current = null;
+        setConv((c) => ({ sum: c.sum + dt, count: c.count + 1 }));
+        if (!control.cutA && !control.cutB && !frozen) pushLog("✦", "SYNC", "all operations applied", "converged", "ack");
+      }
+    } else if (divergedSince.current == null) {
+      divergedSince.current = Date.now();
+    }
+  }, [textA, textB, control.cutA, control.cutB, frozen, pushLog]);
+
+  const onReadyA = useCallback((p: Provider) => {
+    providerA.current = p;
   }, []);
+  const onReadyB = useCallback((p: Provider) => {
+    providerB.current = p;
+  }, []);
+  const onState = useCallback((site: "A" | "B", state: PaneState) => {
+    if (site === "A") {
+      setTextA(state.text);
+      setPendingA(state.pending);
+    } else {
+      setTextB(state.text);
+      setPendingB(state.pending);
+    }
+  }, []);
+  const onEdit = useCallback(
+    (site: "A" | "B", edit: TextEdit) => {
+      const n = edit.inserted.length + edit.removed;
+      setOpsTotal((v) => v + n);
+      setRecent((r) => r.concat([{ t: Date.now(), n }]));
+      const other = site === "A" ? "B" : "A";
+      if (edit.inserted.length > 0) {
+        const snip = edit.inserted.replace(/\n/g, "⏎");
+        pushLog(site, "INSERT", `"${snip.length > 18 ? `${snip.slice(0, 18)}…` : snip}"`, `→ ${other}`, "flight");
+      } else if (edit.removed > 0) {
+        pushLog(site, "DELETE", `${edit.removed} ${edit.removed === 1 ? "char" : "chars"}`, `→ ${other}`, "flight");
+      }
+    },
+    [pushLog]
+  );
+  const onBlocked = useCallback(() => {
+    setFrozen(true);
+    pushLog("✦", "FROZEN", "room full, sync stopped", "local only", "drop");
+  }, [pushLog]);
+
+  const onTheme = useCallback((t: Theme) => {
+    applyTheme(t);
+    setTheme(t);
+  }, []);
+
+  const toggleCut = useCallback(
+    (site: "A" | "B") => {
+      setControl((c) => {
+        const key = site === "A" ? "cutA" : "cutB";
+        const next = !c[key];
+        pushLog(site, next ? "CUT" : "JOIN", next ? "link severed" : "link restored", next ? "offline" : "online", next ? "drop" : "ack");
+        if (!next) {
+          setReconciling(true);
+          setTimeout(() => setReconciling(false), 1400);
+        }
+        return { ...c, [key]: next };
+      });
+    },
+    [pushLog]
+  );
+  const onToggleAll = useCallback(() => {
+    setControl((c) => {
+      const on = c.cutA || c.cutB;
+      pushLog("✦", on ? "JOIN" : "CUT", on ? "both links restored" : "both links severed", on ? "online" : "offline", on ? "ack" : "drop");
+      if (on) {
+        setReconciling(true);
+        setTimeout(() => setReconciling(false), 1400);
+      }
+      return { ...c, cutA: !on, cutB: !on };
+    });
+  }, [pushLog]);
 
   const shareUrl = `${window.location.origin}${window.location.pathname}${roomFragment(setup.roomId)}`;
 
   const onShare = useCallback(async () => {
-    if (shared) return;
+    if (shared || waking) return;
     window.history.replaceState(null, "", roomFragment(setup.roomId));
-    setShared(true);
-    setConnecting(true);
-    // Wake the relay before moving onto it. The first request to a sleeping free
-    // instance can take up to a minute to return; until it does, both panes stay
-    // on the local hub, so the demo keeps converging and stays fully usable, and
-    // the wait is shown rather than looking hung. A GET /health wakes the
-    // instance and resolves once it is up.
+    wakeCancelled.current = false;
+    setWaking(true);
+    setWakeElapsed(0);
+    pushLog("✦", "WAKE", "relay asleep, starting up", "waking", "drop");
+    wakeTimer.current = setInterval(() => setWakeElapsed((e) => e + 1), 1000);
+    // Wake the relay while both panes stay on the local hub, so the demo keeps
+    // converging locally and the wait is shown, not hung. The GET resolves once
+    // the free instance is up.
     try {
       await fetch(`${RELAY_URL}/health`, { cache: "no-store" });
     } catch {
-      // The probe was blocked or the relay is unreachable; try the handover
-      // anyway. If it truly cannot be reached the panes' syncs keep failing and
-      // the local hub still works, which is the never-appears-broken fallback.
+      // Probe blocked or unreachable; try the handover anyway, the local hub is
+      // the never-broken floor.
     }
-    // Relay is awake: hand both panes over. switchTransport replays each local
-    // history into the relay and reconciles. Because the panes were already
-    // converged on the local hub, the upgrade is silent, no visible disruption.
+    clearInterval(wakeTimer.current);
+    if (wakeCancelled.current) return;
     const newA = new ControllableTransport(new HttpRelayTransport(RELAY_URL, setup.roomId), activeLinkA.current.state);
     const newB = new ControllableTransport(new HttpRelayTransport(RELAY_URL, setup.roomId), activeLinkB.current.state);
     activeLinkA.current = newA;
     activeLinkB.current = newB;
     await Promise.all([providerA.current?.switchTransport(newA), providerB.current?.switchTransport(newB)]);
-    setConnecting(false);
-  }, [shared, setup.roomId]);
+    setWaking(false);
+    setShared(true);
+    pushLog("✦", "ROOM", "relay awake, room open", "shared", "ack");
+  }, [shared, waking, setup.roomId, pushLog]);
+
+  const onCancelWake = useCallback(() => {
+    wakeCancelled.current = true;
+    clearInterval(wakeTimer.current);
+    setWaking(false);
+    setWakeElapsed(0);
+  }, []);
 
   const onCopy = useCallback(() => {
     void navigator.clipboard?.writeText(shareUrl).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setTimeout(() => setCopied(false), 1600);
     });
   }, [shareUrl]);
 
+  const onFreshRoom = useCallback(() => {
+    window.location.href = window.location.pathname;
+  }, []);
+
+  const phase: Phase = frozen ? "frozen" : waking ? "waking" : shared ? "shared" : "local";
+  const status = computeStatus({ cutA: control.cutA, cutB: control.cutB, phase, reconciling, latency: control.latency, textA, textB, pendingA, pendingB });
+  const metrics: Metrics = {
+    opsTotal,
+    opsReplicated: recent.reduce((sum, r) => sum + r.n, 0),
+    avgMs: conv.count ? Math.round(conv.sum / conv.count) : 0,
+  };
+  const role = shared ? "RELAY" : "LOCAL";
+
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="brand">
-          <span className="brand-mark" />
-          <span className="brand-name">starling</span>
-        </div>
-        <p className="tagline">
-          One document, two replicas. Type in either. Break the connection between them and watch the text heal itself, with
-          no conflict prompt and nothing lost.
-        </p>
-      </header>
+    <div style={{ minHeight: "100vh", background: "var(--bg)", padding: "var(--s4) var(--s4) var(--s7)" }}>
+      <div style={{ maxWidth: "1320px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "var(--s3)" }}>
+        <Header status={status} theme={theme} onTheme={onTheme} />
 
-      <main className="stage">
-        <div className="panes">
-          <EditorPane
-            label="A"
-            color={REPLICA_A_COLOR}
-            replicaId={setup.replicaA}
-            link={setup.linkA}
-            persistence={setup.persistenceA}
-            onReady={onReadyA}
-            onText={setTextA}
-            onBlocked={onBlocked}
-          />
-          <EditorPane
-            label="B"
-            color={REPLICA_B_COLOR}
-            replicaId={setup.replicaB}
-            link={setup.linkB}
-            persistence={setup.persistenceB}
-            onReady={onReadyB}
-            onText={setTextB}
-            onBlocked={onBlocked}
-          />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--s3)", alignItems: "stretch" }}>
+          <EditorPane site="A" role={role} isCut={control.cutA} dead={status.dead} persistence={setup.persistenceA} link={setup.linkA} onReady={onReadyA} onState={onState} onEdit={onEdit} onBlocked={onBlocked} />
+          <Core status={status} onCutA={() => toggleCut("A")} onCutB={() => toggleCut("B")} />
+          <EditorPane site="B" role={role} isCut={control.cutB} dead={status.dead} persistence={setup.persistenceB} link={setup.linkB} onReady={onReadyB} onState={onState} onEdit={onEdit} onBlocked={onBlocked} />
         </div>
 
-        {blocked && (
-          <div className="frozen" role="alert">
-            <p className="frozen-title">This room is full. Syncing has stopped.</p>
-            <p className="frozen-note">
-              The room reached its size limit, so the relay will not accept more changes. You can keep editing here, but new
-              edits stay on this device and no longer reach anyone else.
-            </p>
-            <button type="button" className="frozen-button" onClick={onNewRoom}>
-              start a fresh room
-            </button>
-          </div>
-        )}
+        <BreakIt controls={control} cut={status.cut} onControl={(patch) => setControl((c) => ({ ...c, ...patch }))} onToggleAll={onToggleAll} />
 
-        <StatusStrip textA={textA} textB={textB} />
+        <Health status={status} />
 
-        <Controls state={control} onChange={(patch) => setControl((c) => ({ ...c, ...patch }))} />
+        <ActivityMetrics log={log} metrics={metrics} />
 
-        <section className="share">
-          {shared ? (
-            <>
-              <div className="share-row">
-                <input className="share-url" readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} />
-                <button type="button" className="share-copy" onClick={onCopy}>
-                  {copied ? "copied" : "copy link"}
-                </button>
-              </div>
-              {connecting ? (
-                <p className="share-note share-connecting">
-                  <span className="share-spinner" aria-hidden="true" />
-                  Waking the relay. On the free tier this can take up to a minute. You can keep editing, it is still live, and
-                  it will connect on its own.
-                </p>
-              ) : (
-                <p className="share-note">Anyone with this link can read and edit this room. It is a shared secret, not a login.</p>
-              )}
-            </>
-          ) : (
-            <>
-              <button type="button" className="share-button" onClick={() => void onShare()}>
-                share over the network
-              </button>
-              <p className="share-note">
-                You are editing locally right now, so nothing here touches a server. Sharing opens a relay room and gives you a
-                link others can join.
-              </p>
-            </>
-          )}
-        </section>
-      </main>
+        {phase === "local" && <ShareBlock onShare={() => void onShare()} />}
+        {phase === "waking" && <WakingBlock elapsed={wakeElapsed} onCancel={onCancelWake} />}
+        {phase === "shared" && <SharedBlock roomLink={shareUrl} copied={copied} onCopy={onCopy} />}
+        {phase === "frozen" && <FrozenBlock onFreshRoom={onFreshRoom} />}
+
+        <Footer />
+      </div>
     </div>
   );
 }
