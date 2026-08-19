@@ -82,7 +82,7 @@ Two boundaries in that diagram are load-bearing enough to guard in CI. One keeps
 
 ```bash
 pnpm install
-pnpm test          # 328 property and unit tests
+pnpm test          # the property and unit suite (count in the badge above)
 pnpm run gates     # the two boundary checks
 ```
 
