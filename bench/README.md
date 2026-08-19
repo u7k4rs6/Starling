@@ -239,6 +239,62 @@ scope (§3.1's own target is the deletion case) that costs real bytes on the
 also-extremely-common forward-typing case; insert-run compression is the
 remaining lever.
 
+## Op size (bytes per op): `bench/op-size.mjs`
+
+The producer for the "bytes per op" figure the freeze-cap headroom argument uses
+(DECISIONS #0032: 2 MB / bytes-per-op = how many ops a room holds). Deterministic
+(a byte count, not a timing), so it reproduces exactly.
+
+`node bench/op-size.mjs`, measuring `Doc` (Fugue):
+
+```
+=== Doc (Fugue) encoded wire size per op ===
+  sequential insert      12.3 bytes/op   -> 2 MB holds ~169,821 ops
+  interior insert        12.3 bytes/op   -> 2 MB holds ~170,282 ops
+  mixed edit churn       10.6 bytes/op   -> 2 MB holds ~197,722 ops
+  insert + 50% delete    8.2 bytes/op    -> 2 MB holds ~254,722 ops
+```
+
+This is `Doc`; the `~13.6 bytes/char` figure elsewhere is `RgaDoc`
+(`bench/encode-decode.mjs`), which puts different things in each op. Both honest,
+different subjects.
+
+## Reconciliation amplification: `bench/amplification.mjs`
+
+The producer for the amplification bound in DECISIONS #0032. When the relay
+restarts onto an empty log, clients re-push, and the opaque log does not dedupe,
+so this adds real bytes. It runs the real `Provider` sync loop against the real
+`LogStore` (per-document generation token, out-of-range-reads-as-empty), swapping
+in a fresh store to model a restart.
+
+`node bench/amplification.mjs`:
+
+```
+=== Reconciliation amplification: 3 clients, 900-op document, 5 restarts ===
+  single copy of the document on the log: 10,143 bytes
+  staggered  reconcile, log bytes per restart: 10,137, 10,137, 10,137, 10,137, 10,137  (converged=true)
+  concurrent reconcile, log bytes per restart: 30,411, 30,411, 30,411, 30,411, 30,411  (converged=true)
+  worst single-restart log vs 2 MB cap: 30,411 bytes = 1.45% of 2,097,152
+```
+
+So the worst case is bounded by client count (not reconciliation count) and does
+not accumulate across restarts: about 10 KB staggered, about 30 KB fully
+concurrent, 1.45% of the cap for a 900-op document.
+
+## The `docs/assets/bench.svg` chart hardcodes its numbers
+
+`bench.svg` is a hand-drawn chart, not generated art, so its numbers are
+transcribed by hand and can drift from the benches silently. **If you change a
+bench below, edit the SVG to match.** What it hardcodes, and the bench that
+produces each:
+
+| Number in `bench.svg` | Meaning | Produced by |
+|---|---|---|
+| `4.6 ms` | Yjs cold-open, 100k | `bench/yjs-comparison.mjs --full` |
+| `110 ms` | `Doc` (Fugue) cold-open (replay), 100k | `bench/cold-open.mjs --full` |
+| `365 ms` | `RgaDoc` cold-open (replay), 100k | `bench/cold-open.mjs --full` |
+| `168,000 ms` | `Doc` cold-open **before F-8** | historical; not reproducible from HEAD (F-8 fixed it), see #0026 |
+
 ## Summary
 
 | Target | Result |

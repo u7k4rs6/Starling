@@ -16,9 +16,11 @@
     "gates": "pnpm run gate:core-isolation && pnpm run gate:relay-ignorance",
     "bench:cold-open": "node bench/cold-open.mjs",
     "bench:encode-decode": "node bench/encode-decode.mjs",
+    "bench:op-size": "node bench/op-size.mjs",
+    "bench:amplification": "node bench/amplification.mjs",
     "bench:memory": "node bench/memory.mjs",
     "bench:yjs": "node bench/yjs-comparison.mjs",
-    "bench": "pnpm run bench:cold-open && pnpm run bench:encode-decode && pnpm run bench:memory && pnpm run bench:yjs"
+    "bench": "pnpm run bench:cold-open && pnpm run bench:encode-decode && pnpm run bench:op-size && pnpm run bench:amplification && pnpm run bench:memory && pnpm run bench:yjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
